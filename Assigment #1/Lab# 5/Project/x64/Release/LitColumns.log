@@ -1,0 +1,37 @@
+﻿  d3dApp.cpp
+  d3dUtil.cpp
+  DDSTextureLoader.cpp
+  GameTimer.cpp
+  GeometryGenerator.cpp
+..\..\Common\GeometryGenerator.cpp(119): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+..\..\Common\GeometryGenerator.cpp(120): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+..\..\Common\GeometryGenerator.cpp(121): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+..\..\Common\GeometryGenerator.cpp(122): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+..\..\Common\GeometryGenerator.cpp(123): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+..\..\Common\GeometryGenerator.cpp(124): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+..\..\Common\GeometryGenerator.cpp(125): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+..\..\Common\GeometryGenerator.cpp(126): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+..\..\Common\GeometryGenerator.cpp(129): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+..\..\Common\GeometryGenerator.cpp(130): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+..\..\Common\GeometryGenerator.cpp(131): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+..\..\Common\GeometryGenerator.cpp(132): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+..\..\Common\GeometryGenerator.cpp(133): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+..\..\Common\GeometryGenerator.cpp(134): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+..\..\Common\GeometryGenerator.cpp(135): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+..\..\Common\GeometryGenerator.cpp(136): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+  MathHelper.cpp
+  FrameResource.cpp
+  LitColumnsApp.cpp
+LitColumnsApp.cpp(856): warning C4305: 'argument': truncation from 'double' to 'float'
+LitColumnsApp.cpp(864): warning C4305: 'argument': truncation from 'double' to 'float'
+LitColumnsApp.cpp(872): warning C4305: 'argument': truncation from 'double' to 'float'
+LitColumnsApp.cpp(970): warning C4305: 'argument': truncation from 'double' to 'float'
+LitColumnsApp.cpp(1453): warning C4101: 'hor': unreferenced local variable
+LitColumnsApp.cpp(1452): warning C4101: 'vert': unreferenced local variable
+  Generating code
+  2225 of 2249 functions (98.9%) were compiled, the rest were copied from previous compilation.
+    14 functions were new in current compilation
+    0 functions had inline decision re-evaluated but remain unchanged
+  Finished generating code
+  LitColumns.vcxproj -> C:\Users\Student\Desktop\Assignment #1\Lab #5\Lab# 5\Project\x64\Release\LitColumns.exe
+  LitColumns.vcxproj -> C:\Users\Student\Desktop\Assignment #1\Lab #5\Lab# 5\Project\x64\Release\LitColumns.pdb (Full PDB)
