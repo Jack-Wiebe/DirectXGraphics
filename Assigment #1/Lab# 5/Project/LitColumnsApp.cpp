@@ -811,6 +811,24 @@ void LitColumnsApp::BuildPSOs()
 	opaquePsoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
 	opaquePsoDesc.DSVFormat = mDepthStencilFormat;
     ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaquePsoDesc, IID_PPV_ARGS(&mOpaquePSO)));
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC transparentPsoDesc = opaquePsoDesc;
+
+	D3D12_RENDER_TARGET_BLEND_DESC transparencyBlendDesc;
+	transparencyBlendDesc.BlendEnable = true;
+	transparencyBlendDesc.LogicOpEnable = false;
+	transparencyBlendDesc.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+	transparencyBlendDesc.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+	transparencyBlendDesc.BlendOp = D3D12_BLEND_OP_ADD;
+	transparencyBlendDesc.SrcBlendAlpha = D3D12_BLEND_ONE;
+	transparencyBlendDesc.DestBlendAlpha = D3D12_BLEND_ZERO;
+	transparencyBlendDesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+	transparencyBlendDesc.LogicOp = D3D12_LOGIC_OP_NOOP;
+	transparencyBlendDesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+	transparentPsoDesc.BlendState.RenderTarget[0] = transparencyBlendDesc;
+	//ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&transparentPsoDesc, IID_PPV_ARGS(&mPSOs["transparent"])));
+	
 }
 
 void LitColumnsApp::BuildFrameResources()
@@ -1445,19 +1463,21 @@ void LitColumnsApp::BuildRenderItems()
 	objCBIndex = 44 + 52;
 	float offset = 0;
 	
-	float scale = 2.0f;
+	float scale = 5.0f;
+	float wallWidth = 0.5f;
 	int steps = 6;
 	float outterOffset = scale * steps;
 	
 	float vert;
 	float hor;
 
+	
 	///border
 	for (int i = 0; i < steps; ++i)
 	{
 		auto MazeWallTop = std::make_unique<RenderItem>();
 
-		XMStoreFloat4x4(&MazeWallTop->World, XMMatrixScaling(scale, 1.0f, 1.0f)*XMMatrixTranslation(offset + scale/2 - outterOffset / 2, 0.0f, 0.0f - outterOffset / 2));
+		XMStoreFloat4x4(&MazeWallTop->World, XMMatrixScaling(scale, wallWidth, wallWidth)*XMMatrixTranslation(offset + scale/2 - outterOffset / 2, 0.0f, 0.0f - outterOffset / 2));
 		XMStoreFloat4x4(&MazeWallTop->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
 		MazeWallTop->ObjCBIndex = objCBIndex;
 		MazeWallTop->Mat = mMaterials["stone0"].get();
@@ -1472,7 +1492,7 @@ void LitColumnsApp::BuildRenderItems()
 
 		auto MazeWallBot = std::make_unique<RenderItem>();
 		
-		XMStoreFloat4x4(&MazeWallBot->World, XMMatrixScaling(scale, 1.0f, 1.0f)*XMMatrixTranslation(offset + scale/2 - outterOffset / 2, 0.0f, outterOffset - outterOffset / 2));
+		XMStoreFloat4x4(&MazeWallBot->World, XMMatrixScaling(scale, wallWidth, wallWidth)*XMMatrixTranslation(offset + scale/2 - outterOffset / 2, 0.0f, outterOffset - outterOffset / 2));
 		XMStoreFloat4x4(&MazeWallBot->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
 		MazeWallBot->ObjCBIndex = objCBIndex;
 		MazeWallBot->Mat = mMaterials["stone0"].get();
@@ -1493,7 +1513,7 @@ void LitColumnsApp::BuildRenderItems()
 	{
 		auto MazeWallRight = std::make_unique<RenderItem>();
 
-		XMStoreFloat4x4(&MazeWallRight->World, XMMatrixScaling(1.0f, 1.0f, scale)*XMMatrixTranslation(0.0f - outterOffset / 2, 0.0f, offset + scale/2 - outterOffset / 2));
+		XMStoreFloat4x4(&MazeWallRight->World, XMMatrixScaling(wallWidth, wallWidth, scale)*XMMatrixTranslation(0.0f - outterOffset / 2.0f, 0.0f, offset + scale/2.0f - outterOffset / 2.0f));
 		XMStoreFloat4x4(&MazeWallRight->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
 		MazeWallRight->ObjCBIndex = objCBIndex;
 		MazeWallRight->Mat = mMaterials["stone0"].get();
@@ -1508,7 +1528,7 @@ void LitColumnsApp::BuildRenderItems()
 
 		auto MazeWallLeft = std::make_unique<RenderItem>();
 
-		XMStoreFloat4x4(&MazeWallLeft->World, XMMatrixScaling(1.0, 1.0f, scale)*XMMatrixTranslation(outterOffset - outterOffset/2, 0.0f, offset + scale/2 - outterOffset / 2));
+		XMStoreFloat4x4(&MazeWallLeft->World, XMMatrixScaling(wallWidth, wallWidth, scale)*XMMatrixTranslation(outterOffset - outterOffset/2.0f, 0.0f, offset + scale/2.0f - outterOffset / 2.0f));
 		XMStoreFloat4x4(&MazeWallLeft->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
 		MazeWallLeft->ObjCBIndex = objCBIndex;
 		MazeWallLeft->Mat = mMaterials["stone0"].get();
@@ -1521,6 +1541,58 @@ void LitColumnsApp::BuildRenderItems()
 
 		offset += scale;
 		objCBIndex++;
+	}
+	
+	//nested for loop horizontal then verticle
+
+	int num;
+
+	for (int row = 0; row < steps; row++)
+	{
+		for (int col = 0; col < steps; col++)
+		{
+			num = rand() % 5;
+			if (num > 1) {
+				auto MazeWallVert = std::make_unique<RenderItem>();
+
+				//row * scale, 0.0f, col * scale
+				//XMMatrixTranslation(0.0f - outterOffset / 2, 0.0f, offset + scale / 2 - outterOffset / 2)
+
+				XMStoreFloat4x4(&MazeWallVert->World, XMMatrixScaling(wallWidth, wallWidth, scale)*XMMatrixTranslation(row * scale - outterOffset / 2.0f + scale / 2.0f, 0.0f, col * scale - outterOffset / 2.0f + scale / 2.0f));
+				XMStoreFloat4x4(&MazeWallVert->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
+				MazeWallVert->ObjCBIndex = objCBIndex;
+				MazeWallVert->Mat = mMaterials["stone0"].get();
+				MazeWallVert->Geo = mGeometries["shapeGeo"].get();
+				MazeWallVert->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+				MazeWallVert->IndexCount = MazeWallVert->Geo->DrawArgs["box"].IndexCount;
+				MazeWallVert->StartIndexLocation = MazeWallVert->Geo->DrawArgs["box"].StartIndexLocation;
+				MazeWallVert->BaseVertexLocation = MazeWallVert->Geo->DrawArgs["box"].BaseVertexLocation;
+				mAllRitems.push_back(std::move(MazeWallVert));
+
+				objCBIndex++;
+			}
+
+			num = rand() % 5;
+			if(num > 1)
+			{
+				auto MazeWallHor = std::make_unique<RenderItem>();
+
+				XMStoreFloat4x4(&MazeWallHor->World, XMMatrixScaling(scale, wallWidth, wallWidth)*XMMatrixTranslation(row * scale - outterOffset / 2.0f + scale / 2.0f, 0.0f, col * scale - outterOffset / 2.0f + scale / 2.0f));
+				XMStoreFloat4x4(&MazeWallHor->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
+				MazeWallHor->ObjCBIndex = objCBIndex;
+				MazeWallHor->Mat = mMaterials["stone0"].get();
+				MazeWallHor->Geo = mGeometries["shapeGeo"].get();
+				MazeWallHor->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+				MazeWallHor->IndexCount = MazeWallHor->Geo->DrawArgs["box"].IndexCount;
+				MazeWallHor->StartIndexLocation = MazeWallHor->Geo->DrawArgs["box"].StartIndexLocation;
+				MazeWallHor->BaseVertexLocation = MazeWallHor->Geo->DrawArgs["box"].BaseVertexLocation;
+				mAllRitems.push_back(std::move(MazeWallHor));
+
+				objCBIndex++;
+			}
+
+		}
+
 	}
 
 
