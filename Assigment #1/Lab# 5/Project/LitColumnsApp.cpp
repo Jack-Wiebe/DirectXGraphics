@@ -77,6 +77,9 @@ private:
 	void UpdateMaterialCBs(const GameTimer& gt);
 	void UpdateMainPassCB(const GameTimer& gt);
 
+	void LoadTextures();
+	void BuildDescriptorHeaps();
+
     void BuildRootSignature();
     void BuildShadersAndInputLayout();
     void BuildShapeGeometry();
@@ -87,6 +90,8 @@ private:
     void BuildRenderItems();
     void DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
  
+	std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
+
 private:
 
     std::vector<std::unique_ptr<FrameResource>> mFrameResources;
@@ -173,7 +178,10 @@ bool LitColumnsApp::Initialize()
 	// so we have to query this information.
     mCbvSrvDescriptorSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-    BuildRootSignature();
+	LoadTextures();
+	BuildRootSignature();
+	BuildDescriptorHeaps();
+    
     BuildShadersAndInputLayout();
     BuildShapeGeometry();
 	BuildSkullGeometry();
@@ -252,6 +260,9 @@ void LitColumnsApp::Draw(const GameTimer& gt)
 
     // Specify the buffers we are going to render to.
     mCommandList->OMSetRenderTargets(1, &CurrentBackBufferView(), true, &DepthStencilView());
+
+	ID3D12DescriptorHeap* descriptorHeaps[] = { mSrvDescriptorHeap.Get() };
+	mCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
 
 	mCommandList->SetGraphicsRootSignature(mRootSignature.Get());
 
@@ -441,16 +452,24 @@ void LitColumnsApp::UpdateMainPassCB(const GameTimer& gt)
 
 void LitColumnsApp::BuildRootSignature()
 {
+	CD3DX12_DESCRIPTOR_RANGE texTable;
+	texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+
 	// Root parameter can be a table, root descriptor or root constants.
-	CD3DX12_ROOT_PARAMETER slotRootParameter[3];
+	CD3DX12_ROOT_PARAMETER slotRootParameter[4];
 
 	// Create root CBV.
-	slotRootParameter[0].InitAsConstantBufferView(0);
-	slotRootParameter[1].InitAsConstantBufferView(1);
-	slotRootParameter[2].InitAsConstantBufferView(2);
+	slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);
+	slotRootParameter[1].InitAsConstantBufferView(0);
+	slotRootParameter[2].InitAsConstantBufferView(1);
+	slotRootParameter[3].InitAsConstantBufferView(2);
+
+	auto staticSamplers = GetStaticSamplers();
 
 	// A root signature is an array of root parameters.
-	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(3, slotRootParameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(4, slotRootParameter,
+		(UINT)staticSamplers.size(), staticSamplers.data(),
+		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
 	// create a root signature with a single slot which points to a descriptor range consisting of a single constant buffer
 	ComPtr<ID3DBlob> serializedRootSig = nullptr;
@@ -653,7 +672,7 @@ void LitColumnsApp::BuildShapeGeometry()
 		vertices[k].Pos = sphere.Vertices[i].Position;
 		vertices[k].Normal = sphere.Vertices[i].Normal;
 	}
-
+	
 	
 
 	std::vector<std::uint16_t> indices;
@@ -812,6 +831,7 @@ void LitColumnsApp::BuildPSOs()
 	opaquePsoDesc.DSVFormat = mDepthStencilFormat;
     ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaquePsoDesc, IID_PPV_ARGS(&mOpaquePSO)));
 
+	
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC transparentPsoDesc = opaquePsoDesc;
 
 	D3D12_RENDER_TARGET_BLEND_DESC transparencyBlendDesc;
@@ -840,29 +860,119 @@ void LitColumnsApp::BuildFrameResources()
     }
 }
 
+void LitColumnsApp::LoadTextures()
+{
+	auto woodCrateTex = std::make_unique<Texture>();
+	woodCrateTex->Name = "woodCrateTex";
+	woodCrateTex->Filename = L"Textures/WoodCrate01.dds";
+	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
+		mCommandList.Get(), woodCrateTex->Filename.c_str(),
+		woodCrateTex->Resource, woodCrateTex->UploadHeap));
+
+
+	auto stoneTex = std::make_unique<Texture>();
+	stoneTex->Name = "stoneTex";
+	stoneTex->Filename = L"Textures/stone.dds";
+	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
+		mCommandList.Get(), stoneTex->Filename.c_str(),
+		stoneTex->Resource, stoneTex->UploadHeap));
+
+	auto waterTex = std::make_unique<Texture>();
+	waterTex->Name = "waterTex";
+	waterTex->Filename = L"Textures/water1.dds";
+	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
+		mCommandList.Get(), waterTex->Filename.c_str(),
+		waterTex->Resource, waterTex->UploadHeap));
+
+	mTextures[woodCrateTex->Name] = std::move(woodCrateTex);
+	mTextures[stoneTex->Name] = std::move(stoneTex);
+	mTextures[waterTex->Name] = std::move(waterTex);
+
+}
+
+void LitColumnsApp::BuildDescriptorHeaps()
+{
+	//
+	// Create the SRV heap.
+	//
+	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
+	srvHeapDesc.NumDescriptors = 3;
+	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+	ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvDescriptorHeap)));
+
+	//
+	// Fill out the heap with actual descriptors.
+	//
+	CD3DX12_CPU_DESCRIPTOR_HANDLE hDescriptor(mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+
+	auto woodCrateTex = mTextures["woodCrateTex"]->Resource;
+	auto stoneTex = mTextures["stoneTex"]->Resource;
+	auto waterTex = mTextures["waterTex"]->Resource;
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc.Format = woodCrateTex->GetDesc().Format;
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Texture2D.MostDetailedMip = 0;
+	srvDesc.Texture2D.MipLevels = woodCrateTex->GetDesc().MipLevels;
+	srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
+	md3dDevice->CreateShaderResourceView(woodCrateTex.Get(), &srvDesc, hDescriptor);
+
+	// next descriptor
+	hDescriptor.Offset(1, mCbvSrvDescriptorSize);
+	//desc
+	srvDesc.Texture2D.MipLevels = stoneTex->GetDesc().MipLevels;
+	srvDesc.Format = stoneTex->GetDesc().Format;
+	//upload
+	md3dDevice->CreateShaderResourceView(stoneTex.Get(), &srvDesc, hDescriptor);
+	
+	// next descriptor
+	hDescriptor.Offset(1, mCbvSrvDescriptorSize);
+	//desc
+	srvDesc.Texture2D.MipLevels = waterTex->GetDesc().MipLevels;
+	srvDesc.Format = waterTex->GetDesc().Format;
+	//upload
+	md3dDevice->CreateShaderResourceView(waterTex.Get(), &srvDesc, hDescriptor);
+
+
+	/*D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc2 = {};
+	srvDesc2.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc2.Format = stoneTex->GetDesc().Format;
+	srvDesc2.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srvDesc2.Texture2D.MostDetailedMip = 0;
+	srvDesc2.Texture2D.MipLevels = stoneTex->GetDesc().MipLevels;
+	srvDesc2.Texture2D.ResourceMinLODClamp = 0.0f;
+
+	md3dDevice->CreateShaderResourceView(stoneTex.Get(), &srvDesc2, hDescriptor2);*/
+
+	
+}
+
 void LitColumnsApp::BuildMaterials()
 {
 	auto bricks0 = std::make_unique<Material>();
 	bricks0->Name = "bricks0";
 	bricks0->MatCBIndex = 0;
 	bricks0->DiffuseSrvHeapIndex = 0;
-	bricks0->DiffuseAlbedo = XMFLOAT4(Colors::ForestGreen);
-	bricks0->FresnelR0 = XMFLOAT3(0.02f, 0.02f, 0.02f);
+	bricks0->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+	bricks0->FresnelR0 = XMFLOAT3(0.05f, 0.05f, 0.05f);
 	bricks0->Roughness = 0.1f;
+
 
 	auto stone0 = std::make_unique<Material>();
 	stone0->Name = "stone0";
 	stone0->MatCBIndex = 1;
 	stone0->DiffuseSrvHeapIndex = 1;
-	stone0->DiffuseAlbedo = XMFLOAT4(Colors::LightSteelBlue);
+	stone0->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
 	stone0->FresnelR0 = XMFLOAT3(0.05f, 0.05f, 0.05f);
-	stone0->Roughness = 0.3f;
+	stone0->Roughness = 0.1f;
  
 	auto tile0 = std::make_unique<Material>();
 	tile0->Name = "tile0";
 	tile0->MatCBIndex = 2;
 	tile0->DiffuseSrvHeapIndex = 2;
-	tile0->DiffuseAlbedo = XMFLOAT4(Colors::LightGray);
+	tile0->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
 	tile0->FresnelR0 = XMFLOAT3(0.02f, 0.02f, 0.02f);
 	tile0->Roughness = 0.2f;
 
@@ -904,7 +1014,7 @@ void LitColumnsApp::BuildRenderItems()
 	XMStoreFloat4x4(&boxRitem->World, XMMatrixScaling(10.0f, 4.0f, 10.0f)*XMMatrixTranslation(0.0f, 2.0f, 0.0f));
 	XMStoreFloat4x4(&boxRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
 	boxRitem->ObjCBIndex = 0;
-	boxRitem->Mat = mMaterials["stone0"].get();
+	boxRitem->Mat = mMaterials["bricks0"].get();
 	boxRitem->Geo = mGeometries["shapeGeo"].get();
 	boxRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	boxRitem->IndexCount = boxRitem->Geo->DrawArgs["box"].IndexCount;
@@ -912,10 +1022,22 @@ void LitColumnsApp::BuildRenderItems()
 	boxRitem->BaseVertexLocation = boxRitem->Geo->DrawArgs["box"].BaseVertexLocation;
 	mAllRitems.push_back(std::move(boxRitem));
 
+	auto moatRitem = std::make_unique<RenderItem>();
+	XMStoreFloat4x4(&moatRitem->World, XMMatrixScaling(1.f, 1.f, .1f)*XMMatrixRotationX(XM_PI / 2)*XMMatrixTranslation(0.0f, 0.0f, 0.0f));
+	XMStoreFloat4x4(&moatRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
+	moatRitem->ObjCBIndex = 1;
+	moatRitem->Mat = mMaterials["tile0"].get();
+	moatRitem->Geo = mGeometries["shapeGeo"].get();
+	moatRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	moatRitem->IndexCount = moatRitem->Geo->DrawArgs["torus"].IndexCount;
+	moatRitem->StartIndexLocation = moatRitem->Geo->DrawArgs["torus"].StartIndexLocation;
+	moatRitem->BaseVertexLocation = moatRitem->Geo->DrawArgs["torus"].BaseVertexLocation;
+	mAllRitems.push_back(std::move(moatRitem));
+
 	auto centerCylinderRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&centerCylinderRitem->World, XMMatrixScaling(2.0f, 1.0f, 2.0f)*XMMatrixTranslation(0.0f, 3.0f, 0.0f));
 	XMStoreFloat4x4(&centerCylinderRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	centerCylinderRitem->ObjCBIndex = 1;
+	centerCylinderRitem->ObjCBIndex = 2;
 	centerCylinderRitem->Mat = mMaterials["stone0"].get();
 	centerCylinderRitem->Geo = mGeometries["shapeGeo"].get();
 	centerCylinderRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
@@ -927,8 +1049,8 @@ void LitColumnsApp::BuildRenderItems()
 	auto diamondRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&diamondRitem->World, XMMatrixScaling(0.2f, 0.2f, 0.2f)*XMMatrixRotationX(80.5)*XMMatrixTranslation(-0.7f, 2.5f, -0.7f));
 	XMStoreFloat4x4(&diamondRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	diamondRitem->ObjCBIndex = 2;
-	diamondRitem->Mat = mMaterials["diamondMat"].get();
+	diamondRitem->ObjCBIndex = 3;
+	diamondRitem->Mat = mMaterials["stone0"].get();
 	diamondRitem->Geo = mGeometries["shapeGeo"].get();
 	diamondRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	diamondRitem->IndexCount = diamondRitem->Geo->DrawArgs["diamond"].IndexCount;
@@ -939,8 +1061,8 @@ void LitColumnsApp::BuildRenderItems()
 	auto diamondLeftRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&diamondLeftRitem->World, XMMatrixScaling(0.2f, 0.2f, 0.2f)*XMMatrixRotationX(80.5)*XMMatrixTranslation(0.7f, 2.5f, -0.7f));
 	XMStoreFloat4x4(&diamondLeftRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	diamondLeftRitem->ObjCBIndex = 3;
-	diamondLeftRitem->Mat = mMaterials["diamondMatRed"].get();
+	diamondLeftRitem->ObjCBIndex = 4;
+	diamondLeftRitem->Mat = mMaterials["stone0"].get();
 	diamondLeftRitem->Geo = mGeometries["shapeGeo"].get();
 	diamondLeftRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	diamondLeftRitem->IndexCount = diamondLeftRitem->Geo->DrawArgs["diamond"].IndexCount;
@@ -951,8 +1073,8 @@ void LitColumnsApp::BuildRenderItems()
 	auto coneRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&coneRitem->World, XMMatrixScaling(1.0f, 1.0f, 1.0f)*XMMatrixRotationX(0.0f)*XMMatrixTranslation(0.0f, 6.0f, 0.0f));
 	XMStoreFloat4x4(&coneRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	coneRitem->ObjCBIndex = 4;
-	coneRitem->Mat = mMaterials["diamondMat"].get();
+	coneRitem->ObjCBIndex = 5;
+	coneRitem->Mat = mMaterials["stone0"].get();
 	coneRitem->Geo = mGeometries["shapeGeo"].get();
 	coneRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	coneRitem->IndexCount = coneRitem->Geo->DrawArgs["cone"].IndexCount;
@@ -963,8 +1085,8 @@ void LitColumnsApp::BuildRenderItems()
 	auto flagCylinderRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&flagCylinderRitem->World, XMMatrixScaling(.1f, 1.0f, .1f)*XMMatrixRotationX(0.0f)*XMMatrixTranslation(0.0f, 5.0f, 0.0f));
 	XMStoreFloat4x4(&flagCylinderRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	flagCylinderRitem->ObjCBIndex = 5;
-	flagCylinderRitem->Mat = mMaterials["bricks0"].get();
+	flagCylinderRitem->ObjCBIndex = 6;
+	flagCylinderRitem->Mat = mMaterials["stone0"].get();
 	flagCylinderRitem->Geo = mGeometries["shapeGeo"].get();
 	flagCylinderRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	flagCylinderRitem->IndexCount = flagCylinderRitem->Geo->DrawArgs["cylinder"].IndexCount;
@@ -975,8 +1097,8 @@ void LitColumnsApp::BuildRenderItems()
 	auto flagBoxRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&flagBoxRitem->World, XMMatrixScaling(1.0f, .4f, .1f)*XMMatrixRotationX(0.0f)*XMMatrixTranslation(-.5f, 7.25f, 0.0f));
 	XMStoreFloat4x4(&flagBoxRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	flagBoxRitem->ObjCBIndex = 6;
-	flagBoxRitem->Mat = mMaterials["skullMat"].get();
+	flagBoxRitem->ObjCBIndex = 7;
+	flagBoxRitem->Mat = mMaterials["stone0"].get();
 	flagBoxRitem->Geo = mGeometries["shapeGeo"].get();
 	flagBoxRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	flagBoxRitem->IndexCount = flagBoxRitem->Geo->DrawArgs["box"].IndexCount;
@@ -987,8 +1109,8 @@ void LitColumnsApp::BuildRenderItems()
 	auto doorRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&doorRitem->World, XMMatrixScaling(1.f, .01, 4.f)*XMMatrixRotationX(XM_PI/2)*XMMatrixTranslation(0.0f, 0.0f, -5.0f));
 	XMStoreFloat4x4(&doorRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	doorRitem->ObjCBIndex = 7;
-	doorRitem->Mat = mMaterials["bricks0"].get();
+	doorRitem->ObjCBIndex = 8;
+	doorRitem->Mat = mMaterials["stone0"].get();
 	doorRitem->Geo = mGeometries["shapeGeo"].get();
 	doorRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	doorRitem->IndexCount = doorRitem->Geo->DrawArgs["cylinder"].IndexCount;
@@ -996,23 +1118,11 @@ void LitColumnsApp::BuildRenderItems()
 	doorRitem->BaseVertexLocation = doorRitem->Geo->DrawArgs["cylinder"].BaseVertexLocation;
 	mAllRitems.push_back(std::move(doorRitem));
 
-	auto moatRitem = std::make_unique<RenderItem>();
-	XMStoreFloat4x4(&moatRitem->World, XMMatrixScaling(1.f, 1.f, .1f)*XMMatrixRotationX(XM_PI/2)*XMMatrixTranslation(0.0f, 0.0f, 0.0f));
-	XMStoreFloat4x4(&moatRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	moatRitem->ObjCBIndex = 8;
-	moatRitem->Mat = mMaterials["diamondMat"].get();
-	moatRitem->Geo = mGeometries["shapeGeo"].get();
-	moatRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-	moatRitem->IndexCount = moatRitem->Geo->DrawArgs["torus"].IndexCount;
-	moatRitem->StartIndexLocation = moatRitem->Geo->DrawArgs["torus"].StartIndexLocation;
-	moatRitem->BaseVertexLocation = moatRitem->Geo->DrawArgs["torus"].BaseVertexLocation;
-	mAllRitems.push_back(std::move(moatRitem));
-
 	auto bridgeRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&bridgeRitem->World, XMMatrixScaling(1.0f, 0.04f, 10.0f)*XMMatrixRotationX(0.0f)*XMMatrixTranslation(0.0f, 0.1f, -6.0f));
 	XMStoreFloat4x4(&bridgeRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
 	bridgeRitem->ObjCBIndex = 9;
-	bridgeRitem->Mat = mMaterials["diamondMatRed"].get();
+	bridgeRitem->Mat = mMaterials["stone0"].get();
 	bridgeRitem->Geo = mGeometries["shapeGeo"].get();
 	bridgeRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	bridgeRitem->IndexCount = bridgeRitem->Geo->DrawArgs["box"].IndexCount;
@@ -1024,7 +1134,7 @@ void LitColumnsApp::BuildRenderItems()
     gridRitem->World = MathHelper::Identity4x4();
 	XMStoreFloat4x4(&gridRitem->TexTransform, XMMatrixScaling(10.0f, 10.0f, 1.0f));
 	gridRitem->ObjCBIndex = 10;
-	gridRitem->Mat = mMaterials["tile0"].get();
+	gridRitem->Mat = mMaterials["bricks0"].get();
 	gridRitem->Geo = mGeometries["shapeGeo"].get();
 	gridRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
     gridRitem->IndexCount = gridRitem->Geo->DrawArgs["grid"].IndexCount;
@@ -1036,7 +1146,7 @@ void LitColumnsApp::BuildRenderItems()
 	XMStoreFloat4x4(&skullRitem->World, XMMatrixScaling(0.5f, 0.5f, 0.5f)*XMMatrixTranslation(0.0f, .5f, 0.0f));
 	skullRitem->TexTransform = MathHelper::Identity4x4();
 	skullRitem->ObjCBIndex = 11;
-	skullRitem->Mat = mMaterials["skullMat"].get();
+	skullRitem->Mat = mMaterials["stone0"].get();
 	skullRitem->Geo = mGeometries["skullGeo"].get();
 	skullRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	skullRitem->IndexCount = skullRitem->Geo->DrawArgs["skull"].IndexCount;
@@ -1061,7 +1171,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&leftPyramidRitem->World, leftPyramidWorld);
 		XMStoreFloat4x4(&leftPyramidRitem->TexTransform, brickTexTransform);
 		leftPyramidRitem->ObjCBIndex = objCBIndex++;
-		leftPyramidRitem->Mat = mMaterials["bricks0"].get();
+		leftPyramidRitem->Mat = mMaterials["stone0"].get();
 		leftPyramidRitem->Geo = mGeometries["shapeGeo"].get();
 		leftPyramidRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		leftPyramidRitem->IndexCount = leftPyramidRitem->Geo->DrawArgs["pyramid"].IndexCount;
@@ -1071,7 +1181,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&rightPyramidRitem->World, rightPyramidWorld);
 		XMStoreFloat4x4(&rightPyramidRitem->TexTransform, brickTexTransform);
 		rightPyramidRitem->ObjCBIndex = objCBIndex++;
-		rightPyramidRitem->Mat = mMaterials["bricks0"].get();
+		rightPyramidRitem->Mat = mMaterials["stone0"].get();
 		rightPyramidRitem->Geo = mGeometries["shapeGeo"].get();
 		rightPyramidRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		rightPyramidRitem->IndexCount = rightPyramidRitem->Geo->DrawArgs["pyramid"].IndexCount;
@@ -1081,7 +1191,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&backPyramidRitem->World, backPyramidWorld);
 		XMStoreFloat4x4(&backPyramidRitem->TexTransform, brickTexTransform);
 		backPyramidRitem->ObjCBIndex = objCBIndex++;
-		backPyramidRitem->Mat = mMaterials["bricks0"].get();
+		backPyramidRitem->Mat = mMaterials["stone0"].get();
 		backPyramidRitem->Geo = mGeometries["shapeGeo"].get();
 		backPyramidRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		backPyramidRitem->IndexCount = backPyramidRitem->Geo->DrawArgs["pyramid"].IndexCount;
@@ -1091,7 +1201,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&frontPyramidRitem->World, frontPyramidWorld);
 		XMStoreFloat4x4(&frontPyramidRitem->TexTransform, brickTexTransform);
 		frontPyramidRitem->ObjCBIndex = objCBIndex++;
-		frontPyramidRitem->Mat = mMaterials["bricks0"].get();
+		frontPyramidRitem->Mat = mMaterials["stone0"].get();
 		frontPyramidRitem->Geo = mGeometries["shapeGeo"].get();
 		frontPyramidRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		frontPyramidRitem->IndexCount = frontPyramidRitem->Geo->DrawArgs["pyramid"].IndexCount;
@@ -1175,7 +1285,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&rightWedge1Ritem->World, rightWedge1World);
 		XMStoreFloat4x4(&rightWedge1Ritem->TexTransform, brickTexTransform);
 		rightWedge1Ritem->ObjCBIndex = objCBIndex++;
-		rightWedge1Ritem->Mat = mMaterials["bricks0"].get();
+		rightWedge1Ritem->Mat = mMaterials["stone0"].get();
 		rightWedge1Ritem->Geo = mGeometries["shapeGeo"].get();
 		rightWedge1Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		rightWedge1Ritem->IndexCount = rightWedge1Ritem->Geo->DrawArgs["wedge"].IndexCount;
@@ -1185,7 +1295,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&rightWedge2Ritem->World, rightWedge2World);
 		XMStoreFloat4x4(&rightWedge2Ritem->TexTransform, brickTexTransform);
 		rightWedge2Ritem->ObjCBIndex = objCBIndex++;
-		rightWedge2Ritem->Mat = mMaterials["bricks0"].get();
+		rightWedge2Ritem->Mat = mMaterials["stone0"].get();
 		rightWedge2Ritem->Geo = mGeometries["shapeGeo"].get();
 		rightWedge2Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		rightWedge2Ritem->IndexCount = rightWedge2Ritem->Geo->DrawArgs["wedge"].IndexCount;
@@ -1195,7 +1305,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&rightWedge3Ritem->World, rightWedge3World);
 		XMStoreFloat4x4(&rightWedge3Ritem->TexTransform, brickTexTransform);
 		rightWedge3Ritem->ObjCBIndex = objCBIndex++;
-		rightWedge3Ritem->Mat = mMaterials["bricks0"].get();
+		rightWedge3Ritem->Mat = mMaterials["stone0"].get();
 		rightWedge3Ritem->Geo = mGeometries["shapeGeo"].get();
 		rightWedge3Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		rightWedge3Ritem->IndexCount = rightWedge3Ritem->Geo->DrawArgs["wedge"].IndexCount;
@@ -1205,7 +1315,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&rightWedge4Ritem->World, rightWedge4World);
 		XMStoreFloat4x4(&rightWedge4Ritem->TexTransform, brickTexTransform);
 		rightWedge4Ritem->ObjCBIndex = objCBIndex++;
-		rightWedge4Ritem->Mat = mMaterials["bricks0"].get();
+		rightWedge4Ritem->Mat = mMaterials["stone0"].get();
 		rightWedge4Ritem->Geo = mGeometries["shapeGeo"].get();
 		rightWedge4Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		rightWedge4Ritem->IndexCount = rightWedge4Ritem->Geo->DrawArgs["wedge"].IndexCount;
@@ -1215,7 +1325,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&leftWedge1Ritem->World, leftWedge1World);
 		XMStoreFloat4x4(&leftWedge1Ritem->TexTransform, brickTexTransform);
 		leftWedge1Ritem->ObjCBIndex = objCBIndex++;
-		leftWedge1Ritem->Mat = mMaterials["bricks0"].get();
+		leftWedge1Ritem->Mat = mMaterials["stone0"].get();
 		leftWedge1Ritem->Geo = mGeometries["shapeGeo"].get();
 		leftWedge1Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		leftWedge1Ritem->IndexCount = leftWedge1Ritem->Geo->DrawArgs["wedge"].IndexCount;
@@ -1225,7 +1335,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&leftWedge2Ritem->World, leftWedge2World);
 		XMStoreFloat4x4(&leftWedge2Ritem->TexTransform, brickTexTransform);
 		leftWedge2Ritem->ObjCBIndex = objCBIndex++;
-		leftWedge2Ritem->Mat = mMaterials["bricks0"].get();
+		leftWedge2Ritem->Mat = mMaterials["stone0"].get();
 		leftWedge2Ritem->Geo = mGeometries["shapeGeo"].get();
 		leftWedge2Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		leftWedge2Ritem->IndexCount = leftWedge2Ritem->Geo->DrawArgs["wedge"].IndexCount;
@@ -1235,7 +1345,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&leftWedge3Ritem->World, leftWedge3World);
 		XMStoreFloat4x4(&leftWedge3Ritem->TexTransform, brickTexTransform);
 		leftWedge3Ritem->ObjCBIndex = objCBIndex++;
-		leftWedge3Ritem->Mat = mMaterials["bricks0"].get();
+		leftWedge3Ritem->Mat = mMaterials["stone0"].get();
 		leftWedge3Ritem->Geo = mGeometries["shapeGeo"].get();
 		leftWedge3Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		leftWedge3Ritem->IndexCount = leftWedge3Ritem->Geo->DrawArgs["wedge"].IndexCount;
@@ -1245,7 +1355,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&leftWedge4Ritem->World, leftWedge4World);
 		XMStoreFloat4x4(&leftWedge4Ritem->TexTransform, brickTexTransform);
 		leftWedge4Ritem->ObjCBIndex = objCBIndex++;
-		leftWedge4Ritem->Mat = mMaterials["bricks0"].get();
+		leftWedge4Ritem->Mat = mMaterials["stone0"].get();
 		leftWedge4Ritem->Geo = mGeometries["shapeGeo"].get();
 		leftWedge4Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		leftWedge4Ritem->IndexCount = leftWedge4Ritem->Geo->DrawArgs["wedge"].IndexCount;
@@ -1255,7 +1365,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&leftSpire1Ritem->World, leftSpire1World);
 		XMStoreFloat4x4(&leftSpire1Ritem->TexTransform, brickTexTransform);
 		leftSpire1Ritem->ObjCBIndex = objCBIndex++;
-		leftSpire1Ritem->Mat = mMaterials["bricks0"].get();
+		leftSpire1Ritem->Mat = mMaterials["stone0"].get();
 		leftSpire1Ritem->Geo = mGeometries["shapeGeo"].get();
 		leftSpire1Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		leftSpire1Ritem->IndexCount = leftSpire1Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1265,7 +1375,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&leftSpire2Ritem->World, leftSpire2World);
 		XMStoreFloat4x4(&leftSpire2Ritem->TexTransform, brickTexTransform);
 		leftSpire2Ritem->ObjCBIndex = objCBIndex++;
-		leftSpire2Ritem->Mat = mMaterials["bricks0"].get();
+		leftSpire2Ritem->Mat = mMaterials["stone0"].get();
 		leftSpire2Ritem->Geo = mGeometries["shapeGeo"].get();
 		leftSpire2Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		leftSpire2Ritem->IndexCount = leftSpire2Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1275,7 +1385,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&leftSpire3Ritem->World, leftSpire3World);
 		XMStoreFloat4x4(&leftSpire3Ritem->TexTransform, brickTexTransform);
 		leftSpire3Ritem->ObjCBIndex = objCBIndex++;
-		leftSpire3Ritem->Mat = mMaterials["bricks0"].get();
+		leftSpire3Ritem->Mat = mMaterials["stone0"].get();
 		leftSpire3Ritem->Geo = mGeometries["shapeGeo"].get();
 		leftSpire3Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		leftSpire3Ritem->IndexCount = leftSpire3Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1285,7 +1395,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&leftSpire4Ritem->World, leftSpire4World);
 		XMStoreFloat4x4(&leftSpire4Ritem->TexTransform, brickTexTransform);
 		leftSpire4Ritem->ObjCBIndex = objCBIndex++;
-		leftSpire4Ritem->Mat = mMaterials["bricks0"].get();
+		leftSpire4Ritem->Mat = mMaterials["stone0"].get();
 		leftSpire4Ritem->Geo = mGeometries["shapeGeo"].get();
 		leftSpire4Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		leftSpire4Ritem->IndexCount = leftSpire4Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1295,7 +1405,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&leftSpire5Ritem->World, leftSpire5World);
 		XMStoreFloat4x4(&leftSpire5Ritem->TexTransform, brickTexTransform);
 		leftSpire5Ritem->ObjCBIndex = objCBIndex++;
-		leftSpire5Ritem->Mat = mMaterials["bricks0"].get();
+		leftSpire5Ritem->Mat = mMaterials["stone0"].get();
 		leftSpire5Ritem->Geo = mGeometries["shapeGeo"].get();
 		leftSpire5Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		leftSpire5Ritem->IndexCount = leftSpire5Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1305,7 +1415,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&leftSpire6Ritem->World, leftSpire6World);
 		XMStoreFloat4x4(&leftSpire6Ritem->TexTransform, brickTexTransform);
 		leftSpire6Ritem->ObjCBIndex = objCBIndex++;
-		leftSpire6Ritem->Mat = mMaterials["bricks0"].get();
+		leftSpire6Ritem->Mat = mMaterials["stone0"].get();
 		leftSpire6Ritem->Geo = mGeometries["shapeGeo"].get();
 		leftSpire6Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		leftSpire6Ritem->IndexCount = leftSpire6Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1315,7 +1425,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&leftSpire7Ritem->World, leftSpire7World);
 		XMStoreFloat4x4(&leftSpire7Ritem->TexTransform, brickTexTransform);
 		leftSpire7Ritem->ObjCBIndex = objCBIndex++;
-		leftSpire7Ritem->Mat = mMaterials["bricks0"].get();
+		leftSpire7Ritem->Mat = mMaterials["stone0"].get();
 		leftSpire7Ritem->Geo = mGeometries["shapeGeo"].get();
 		leftSpire7Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		leftSpire7Ritem->IndexCount = leftSpire7Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1325,7 +1435,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&leftSpire8Ritem->World, leftSpire8World);
 		XMStoreFloat4x4(&leftSpire8Ritem->TexTransform, brickTexTransform);
 		leftSpire8Ritem->ObjCBIndex = objCBIndex++;
-		leftSpire8Ritem->Mat = mMaterials["bricks0"].get();
+		leftSpire8Ritem->Mat = mMaterials["stone0"].get();
 		leftSpire8Ritem->Geo = mGeometries["shapeGeo"].get();
 		leftSpire8Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		leftSpire8Ritem->IndexCount = leftSpire8Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1335,7 +1445,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&rightSpire1Ritem->World, rightSpire1World);
 		XMStoreFloat4x4(&rightSpire1Ritem->TexTransform, brickTexTransform);
 		rightSpire1Ritem->ObjCBIndex = objCBIndex++;
-		rightSpire1Ritem->Mat = mMaterials["bricks0"].get();
+		rightSpire1Ritem->Mat = mMaterials["stone0"].get();
 		rightSpire1Ritem->Geo = mGeometries["shapeGeo"].get();
 		rightSpire1Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		rightSpire1Ritem->IndexCount = rightSpire1Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1345,7 +1455,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&rightSpire2Ritem->World, rightSpire2World);
 		XMStoreFloat4x4(&rightSpire2Ritem->TexTransform, brickTexTransform);
 		rightSpire2Ritem->ObjCBIndex = objCBIndex++;
-		rightSpire2Ritem->Mat = mMaterials["bricks0"].get();
+		rightSpire2Ritem->Mat = mMaterials["stone0"].get();
 		rightSpire2Ritem->Geo = mGeometries["shapeGeo"].get();
 		rightSpire2Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		rightSpire2Ritem->IndexCount = rightSpire2Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1355,7 +1465,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&rightSpire3Ritem->World, rightSpire3World);
 		XMStoreFloat4x4(&rightSpire3Ritem->TexTransform, brickTexTransform);
 		rightSpire3Ritem->ObjCBIndex = objCBIndex++;
-		rightSpire3Ritem->Mat = mMaterials["bricks0"].get();
+		rightSpire3Ritem->Mat = mMaterials["stone0"].get();
 		rightSpire3Ritem->Geo = mGeometries["shapeGeo"].get();
 		rightSpire3Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		rightSpire3Ritem->IndexCount = rightSpire3Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1365,7 +1475,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&rightSpire4Ritem->World, rightSpire4World);
 		XMStoreFloat4x4(&rightSpire4Ritem->TexTransform, brickTexTransform);
 		rightSpire4Ritem->ObjCBIndex = objCBIndex++;
-		rightSpire4Ritem->Mat = mMaterials["bricks0"].get();
+		rightSpire4Ritem->Mat = mMaterials["stone0"].get();
 		rightSpire4Ritem->Geo = mGeometries["shapeGeo"].get();
 		rightSpire4Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		rightSpire4Ritem->IndexCount = rightSpire4Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1375,7 +1485,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&rightSpire5Ritem->World, rightSpire5World);
 		XMStoreFloat4x4(&rightSpire5Ritem->TexTransform, brickTexTransform);
 		rightSpire5Ritem->ObjCBIndex = objCBIndex++;
-		rightSpire5Ritem->Mat = mMaterials["bricks0"].get();
+		rightSpire5Ritem->Mat = mMaterials["stone0"].get();
 		rightSpire5Ritem->Geo = mGeometries["shapeGeo"].get();
 		rightSpire5Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		rightSpire5Ritem->IndexCount = rightSpire5Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1385,7 +1495,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&rightSpire6Ritem->World, rightSpire6World);
 		XMStoreFloat4x4(&rightSpire6Ritem->TexTransform, brickTexTransform);
 		rightSpire6Ritem->ObjCBIndex = objCBIndex++;
-		rightSpire6Ritem->Mat = mMaterials["bricks0"].get();
+		rightSpire6Ritem->Mat = mMaterials["stone0"].get();
 		rightSpire6Ritem->Geo = mGeometries["shapeGeo"].get();
 		rightSpire6Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		rightSpire6Ritem->IndexCount = rightSpire6Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1395,7 +1505,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&rightSpire7Ritem->World, rightSpire7World);
 		XMStoreFloat4x4(&rightSpire7Ritem->TexTransform, brickTexTransform);
 		rightSpire7Ritem->ObjCBIndex = objCBIndex++;
-		rightSpire7Ritem->Mat = mMaterials["bricks0"].get();
+		rightSpire7Ritem->Mat = mMaterials["stone0"].get();
 		rightSpire7Ritem->Geo = mGeometries["shapeGeo"].get();
 		rightSpire7Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		rightSpire7Ritem->IndexCount = rightSpire7Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1405,7 +1515,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&rightSpire8Ritem->World, rightSpire8World);
 		XMStoreFloat4x4(&rightSpire8Ritem->TexTransform, brickTexTransform);
 		rightSpire8Ritem->ObjCBIndex = objCBIndex++;
-		rightSpire8Ritem->Mat = mMaterials["bricks0"].get();
+		rightSpire8Ritem->Mat = mMaterials["stone0"].get();
 		rightSpire8Ritem->Geo = mGeometries["shapeGeo"].get();
 		rightSpire8Ritem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		rightSpire8Ritem->IndexCount = rightSpire8Ritem->Geo->DrawArgs["box"].IndexCount;
@@ -1415,7 +1525,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&leftCylRitem->World, rightCylWorld);
 		XMStoreFloat4x4(&leftCylRitem->TexTransform, brickTexTransform);
 		leftCylRitem->ObjCBIndex = objCBIndex++;
-		leftCylRitem->Mat = mMaterials["bricks0"].get();
+		leftCylRitem->Mat = mMaterials["stone0"].get();
 		leftCylRitem->Geo = mGeometries["shapeGeo"].get();
 		leftCylRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		leftCylRitem->IndexCount = leftCylRitem->Geo->DrawArgs["cylinder"].IndexCount;
@@ -1425,7 +1535,7 @@ void LitColumnsApp::BuildRenderItems()
 		XMStoreFloat4x4(&rightCylRitem->World, leftCylWorld);
 		XMStoreFloat4x4(&rightCylRitem->TexTransform, brickTexTransform);
 		rightCylRitem->ObjCBIndex = objCBIndex++;
-		rightCylRitem->Mat = mMaterials["bricks0"].get();
+		rightCylRitem->Mat = mMaterials["stone0"].get();
 		rightCylRitem->Geo = mGeometries["shapeGeo"].get();
 		rightCylRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 		rightCylRitem->IndexCount = rightCylRitem->Geo->DrawArgs["cylinder"].IndexCount;
@@ -1594,7 +1704,7 @@ void LitColumnsApp::BuildRenderItems()
 		}
 
 	}
-
+	
 
 	// All the render items are opaque.
 	for(auto& e : mAllRitems)
@@ -1618,12 +1728,75 @@ void LitColumnsApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const st
         cmdList->IASetIndexBuffer(&ri->Geo->IndexBufferView());
         cmdList->IASetPrimitiveTopology(ri->PrimitiveType);
 
+		CD3DX12_GPU_DESCRIPTOR_HANDLE tex(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+		tex.Offset(ri->Mat->DiffuseSrvHeapIndex, mCbvSrvDescriptorSize);
+
         D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objectCB->GetGPUVirtualAddress() + ri->ObjCBIndex*objCBByteSize;
 		D3D12_GPU_VIRTUAL_ADDRESS matCBAddress = matCB->GetGPUVirtualAddress() + ri->Mat->MatCBIndex*matCBByteSize;
 
-        cmdList->SetGraphicsRootConstantBufferView(0, objCBAddress);
-		cmdList->SetGraphicsRootConstantBufferView(1, matCBAddress);
+		
+		cmdList->SetGraphicsRootDescriptorTable(0, tex);
+        cmdList->SetGraphicsRootConstantBufferView(1, objCBAddress);
+		cmdList->SetGraphicsRootConstantBufferView(3, matCBAddress);
+		
 
         cmdList->DrawIndexedInstanced(ri->IndexCount, 1, ri->StartIndexLocation, ri->BaseVertexLocation, 0);
     }
+}
+
+std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> LitColumnsApp::GetStaticSamplers()
+{
+	// Applications usually only need a handful of samplers.  So just define them all up front
+	// and keep them available as part of the root signature.  
+
+	const CD3DX12_STATIC_SAMPLER_DESC pointWrap(
+		0, // shaderRegister
+		D3D12_FILTER_MIN_MAG_MIP_POINT, // filter
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressU
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressV
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP); // addressW
+
+	const CD3DX12_STATIC_SAMPLER_DESC pointClamp(
+		1, // shaderRegister
+		D3D12_FILTER_MIN_MAG_MIP_POINT, // filter
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressU
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressV
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP); // addressW
+
+	const CD3DX12_STATIC_SAMPLER_DESC linearWrap(
+		2, // shaderRegister
+		D3D12_FILTER_MIN_MAG_MIP_LINEAR, // filter
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressU
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressV
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP); // addressW
+
+	const CD3DX12_STATIC_SAMPLER_DESC linearClamp(
+		3, // shaderRegister
+		D3D12_FILTER_MIN_MAG_MIP_LINEAR, // filter
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressU
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressV
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP); // addressW
+
+	const CD3DX12_STATIC_SAMPLER_DESC anisotropicWrap(
+		4, // shaderRegister
+		D3D12_FILTER_ANISOTROPIC, // filter
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressU
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressV
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressW
+		0.0f,                             // mipLODBias
+		8);                               // maxAnisotropy
+
+	const CD3DX12_STATIC_SAMPLER_DESC anisotropicClamp(
+		5, // shaderRegister
+		D3D12_FILTER_ANISOTROPIC, // filter
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressU
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressV
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressW
+		0.0f,                              // mipLODBias
+		8);                                // maxAnisotropy
+
+	return {
+		pointWrap, pointClamp,
+		linearWrap, linearClamp,
+		anisotropicWrap, anisotropicClamp };
 }
