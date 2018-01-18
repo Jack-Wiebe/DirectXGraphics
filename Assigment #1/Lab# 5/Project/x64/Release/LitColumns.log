@@ -1,14 +1,12 @@
 ﻿  LitColumnsApp.cpp
-LitColumnsApp.cpp(984): warning C4305: 'argument': truncation from 'double' to 'float'
-LitColumnsApp.cpp(992): warning C4305: 'argument': truncation from 'double' to 'float'
-LitColumnsApp.cpp(1000): warning C4305: 'argument': truncation from 'double' to 'float'
-LitColumnsApp.cpp(1110): warning C4305: 'argument': truncation from 'double' to 'float'
-LitColumnsApp.cpp(1582): warning C4101: 'hor': unreferenced local variable
-LitColumnsApp.cpp(1581): warning C4101: 'vert': unreferenced local variable
+LitColumnsApp.cpp(1237): warning C4305: 'argument': truncation from 'double' to 'float'
+LitColumnsApp.cpp(1379): warning C4305: 'argument': truncation from 'double' to 'float'
+LitColumnsApp.cpp(1872): warning C4101: 'hor': unreferenced local variable
+LitColumnsApp.cpp(1871): warning C4101: 'vert': unreferenced local variable
   Generating code
-  53 of 2441 functions ( 2.2%) were compiled, the rest were copied from previous compilation.
+  55 of 2634 functions ( 2.1%) were compiled, the rest were copied from previous compilation.
     0 functions were new in current compilation
-    8 functions had inline decision re-evaluated but remain unchanged
+    7 functions had inline decision re-evaluated but remain unchanged
   Finished generating code
   LitColumns.vcxproj -> C:\Users\Student\Documents\DirectXGraphicsGit\Assigment #1\Lab# 5\Project\x64\Release\LitColumns.exe
   LitColumns.vcxproj -> C:\Users\Student\Documents\DirectXGraphicsGit\Assigment #1\Lab# 5\Project\x64\Release\LitColumns.pdb (Full PDB)

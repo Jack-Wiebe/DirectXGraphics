@@ -51,6 +51,15 @@ struct RenderItem
     int BaseVertexLocation = 0;
 };
 
+enum class RenderLayer : int
+{
+	Opaque = 0,
+	Transparent,
+	AlphaTested,
+	AlphaTestedTreeSprites,
+	Count
+};
+
 class LitColumnsApp : public D3DApp
 {
 public:
@@ -84,6 +93,7 @@ private:
     void BuildShadersAndInputLayout();
     void BuildShapeGeometry();
 	void BuildSkullGeometry();
+	void BuildTreeSpritesGeometry();
     void BuildPSOs();
     void BuildFrameResources();
     void BuildMaterials();
@@ -91,6 +101,9 @@ private:
     void DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
  
 	std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
+
+	float GetHillsHeight(float x, float z)const;
+	XMFLOAT3 GetHillsNormal(float x, float z)const;
 
 private:
 
@@ -108,16 +121,21 @@ private:
 	std::unordered_map<std::string, std::unique_ptr<Material>> mMaterials;
 	std::unordered_map<std::string, std::unique_ptr<Texture>> mTextures;
 	std::unordered_map<std::string, ComPtr<ID3DBlob>> mShaders;
+	std::unordered_map<std::string, ComPtr<ID3D12PipelineState>> mPSOs;
 
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
+	std::vector<D3D12_INPUT_ELEMENT_DESC> mTreeSpriteInputLayout;
 
     ComPtr<ID3D12PipelineState> mOpaquePSO = nullptr;
  
 	// List of all the render items.
 	std::vector<std::unique_ptr<RenderItem>> mAllRitems;
+	
 
 	// Render items divided by PSO.
 	std::vector<RenderItem*> mOpaqueRitems;
+	//new sol
+	std::vector<RenderItem*> mRitemLayer[(int)RenderLayer::Count];
 
     PassConstants mMainPassCB;
 
@@ -185,6 +203,7 @@ bool LitColumnsApp::Initialize()
     BuildShadersAndInputLayout();
     BuildShapeGeometry();
 	BuildSkullGeometry();
+	BuildTreeSpritesGeometry();
 	BuildMaterials();
     BuildRenderItems();
     BuildFrameResources();
@@ -229,7 +248,7 @@ void LitColumnsApp::Update(const GameTimer& gt)
         CloseHandle(eventHandle);
     }
 
-	AnimateMaterials(gt);
+	//AnimateMaterials(gt);
 	UpdateObjectCBs(gt);
 	UpdateMaterialCBs(gt);
 	UpdateMainPassCB(gt);
@@ -245,7 +264,7 @@ void LitColumnsApp::Draw(const GameTimer& gt)
 
     // A command list can be reset after it has been added to the command queue via ExecuteCommandList.
     // Reusing the command list reuses memory.
-    ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), mOpaquePSO.Get()));
+    ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), mPSOs["opaque"].Get()));
 
     mCommandList->RSSetViewports(1, &mScreenViewport);
     mCommandList->RSSetScissorRects(1, &mScissorRect);
@@ -269,7 +288,17 @@ void LitColumnsApp::Draw(const GameTimer& gt)
 	auto passCB = mCurrFrameResource->PassCB->Resource();
 	mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
 
-    DrawRenderItems(mCommandList.Get(), mOpaqueRitems);
+    DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Opaque]);
+
+	mCommandList->SetPipelineState(mPSOs["alphaTested"].Get());
+	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::AlphaTested]);
+
+	mCommandList->SetPipelineState(mPSOs["treeSprites"].Get());
+	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::AlphaTestedTreeSprites]);
+
+	mCommandList->SetPipelineState(mPSOs["transparent"].Get());
+	DrawRenderItems(mCommandList.Get(), mRitemLayer[(int)RenderLayer::Transparent]);
+
 
     // Indicate a state transition on the resource usage.
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
@@ -325,6 +354,7 @@ void LitColumnsApp::OnMouseMove(WPARAM btnState, int x, int y)
     }
     else if((btnState & MK_RBUTTON) != 0)
     {
+		//TODO
         // Make each pixel correspond to 0.2 unit in the scene.
         float dx = 0.05f*static_cast<float>(x - mLastMousePos.x);
         float dy = 0.05f*static_cast<float>(y - mLastMousePos.y);
@@ -362,7 +392,26 @@ void LitColumnsApp::UpdateCamera(const GameTimer& gt)
 
 void LitColumnsApp::AnimateMaterials(const GameTimer& gt)
 {
-	
+	// Scroll the water material texture coordinates.
+	auto waterMat = mMaterials["water"].get();
+
+	float& tu = waterMat->MatTransform(3, 0);
+	float& tv = waterMat->MatTransform(3, 1);
+
+	tu += 0.1f * gt.DeltaTime();
+	tv += 0.02f * gt.DeltaTime();
+
+	if (tu >= 1.0f)
+		tu -= 1.0f;
+
+	if (tv >= 1.0f)
+		tv -= 1.0f;
+
+	waterMat->MatTransform(3, 0) = tu;
+	waterMat->MatTransform(3, 1) = tv;
+
+	// Material has changed, so need to update cbuffer.
+	waterMat->NumFramesDirty = gNumFrameResources;
 }
 
 void LitColumnsApp::UpdateObjectCBs(const GameTimer& gt)
@@ -450,6 +499,52 @@ void LitColumnsApp::UpdateMainPassCB(const GameTimer& gt)
 	currPassCB->CopyData(0, mMainPassCB);
 }
 
+void LitColumnsApp::LoadTextures()
+{
+	auto woodCrateTex = std::make_unique<Texture>();
+	woodCrateTex->Name = "woodCrateTex";
+	woodCrateTex->Filename = L"Textures/bricks2.dds";
+	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
+		mCommandList.Get(), woodCrateTex->Filename.c_str(),
+		woodCrateTex->Resource, woodCrateTex->UploadHeap));
+
+
+	auto stoneTex = std::make_unique<Texture>();
+	stoneTex->Name = "stoneTex";
+	stoneTex->Filename = L"Textures/stone.dds";
+	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
+		mCommandList.Get(), stoneTex->Filename.c_str(),
+		stoneTex->Resource, stoneTex->UploadHeap));
+
+	auto waterTex = std::make_unique<Texture>();
+	waterTex->Name = "waterTex";
+	waterTex->Filename = L"Textures/water1.dds";
+	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
+		mCommandList.Get(), waterTex->Filename.c_str(),
+		waterTex->Resource, waterTex->UploadHeap));
+
+	auto grassTex = std::make_unique<Texture>();
+	grassTex->Name = "grassTex";
+	grassTex->Filename = L"Textures/grass.dds";
+	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
+		mCommandList.Get(), grassTex->Filename.c_str(),
+		grassTex->Resource, grassTex->UploadHeap));
+
+	auto treeArrayTex = std::make_unique<Texture>();
+	treeArrayTex->Name = "treeArrayTex";
+	treeArrayTex->Filename = L"Textures/treeArray2.dds";
+	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
+		mCommandList.Get(), treeArrayTex->Filename.c_str(),
+		treeArrayTex->Resource, treeArrayTex->UploadHeap));
+
+	mTextures[woodCrateTex->Name] = std::move(woodCrateTex);
+	mTextures[stoneTex->Name] = std::move(stoneTex);
+	mTextures[waterTex->Name] = std::move(waterTex);
+	mTextures[grassTex->Name] = std::move(grassTex);
+	mTextures[treeArrayTex->Name] = std::move(treeArrayTex);
+
+}
+
 void LitColumnsApp::BuildRootSignature()
 {
 	CD3DX12_DESCRIPTOR_RANGE texTable;
@@ -492,21 +587,40 @@ void LitColumnsApp::BuildRootSignature()
 
 void LitColumnsApp::BuildShadersAndInputLayout()
 {
+	
+	const D3D_SHADER_MACRO defines[] =
+	{
+		"FOG", "1",
+		NULL, NULL
+	};
 	const D3D_SHADER_MACRO alphaTestDefines[] =
 	{
+		"FOG", "1",
 		"ALPHA_TEST", "1",
 		NULL, NULL
 	};
 
+	//TODO
 	mShaders["standardVS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "VS", "vs_5_1");
-	mShaders["opaquePS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", nullptr, "PS", "ps_5_1");
-	
+	mShaders["opaquePS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", defines, "PS", "ps_5_1");
+	mShaders["alphaTestedPS"] = d3dUtil::CompileShader(L"Shaders\\Default.hlsl", alphaTestDefines, "PS", "ps_5_1");
+
+	mShaders["treeSpriteVS"] = d3dUtil::CompileShader(L"Shaders\\TreeSprite.hlsl", nullptr, "VS", "vs_5_1");
+	mShaders["treeSpriteGS"] = d3dUtil::CompileShader(L"Shaders\\TreeSprite.hlsl", nullptr, "GS", "gs_5_1");
+	mShaders["treeSpritePS"] = d3dUtil::CompileShader(L"Shaders\\TreeSprite.hlsl", alphaTestDefines, "PS", "ps_5_1");
+
     mInputLayout =
     {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
     };
+
+	mTreeSpriteInputLayout =
+	{
+		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "SIZE", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	};
 }
 
 void LitColumnsApp::BuildShapeGeometry()
@@ -623,54 +737,63 @@ void LitColumnsApp::BuildShapeGeometry()
 	{
 		vertices[k].Pos = box.Vertices[i].Position;
 		vertices[k].Normal = box.Vertices[i].Normal;
+		vertices[k].TexC = box.Vertices[i].TexC;
 	}
 
 	for (size_t i = 0; i < cylinder.Vertices.size(); ++i, ++k)
 	{
 		vertices[k].Pos = cylinder.Vertices[i].Position;
 		vertices[k].Normal = cylinder.Vertices[i].Normal;
+		vertices[k].TexC = cylinder.Vertices[i].TexC;
 	}
 
 	for (size_t i = 0; i < diamond.Vertices.size(); ++i, ++k)
 	{
 		vertices[k].Pos = diamond.Vertices[i].Position;
 		vertices[k].Normal = diamond.Vertices[i].Normal;
+		vertices[k].TexC = diamond.Vertices[i].TexC;
 	}
 
 	for (size_t i = 0; i < cone.Vertices.size(); ++i, ++k)
 	{
 		vertices[k].Pos = cone.Vertices[i].Position;
 		vertices[k].Normal = cone.Vertices[i].Normal;
+		vertices[k].TexC = cone.Vertices[i].TexC;
 	}
 
 	for (size_t i = 0; i < wedge.Vertices.size(); ++i, ++k)
 	{
 		vertices[k].Pos = wedge.Vertices[i].Position;
 		vertices[k].Normal = wedge.Vertices[i].Normal;
+		vertices[k].TexC = wedge.Vertices[i].TexC;
 	}
 
 	for (size_t i = 0; i < pyramid.Vertices.size(); ++i, ++k)
 	{
 		vertices[k].Pos = pyramid.Vertices[i].Position;
 		vertices[k].Normal = pyramid.Vertices[i].Normal;
+		vertices[k].TexC = pyramid.Vertices[i].TexC;
 	}
 
 	for (size_t i = 0; i < torus.Vertices.size(); ++i, ++k)
 	{
 		vertices[k].Pos = torus.Vertices[i].Position;
 		vertices[k].Normal = torus.Vertices[i].Normal;
+		vertices[k].TexC = torus.Vertices[i].TexC;
 	}
 
 	for(size_t i = 0; i < grid.Vertices.size(); ++i, ++k)
 	{
 		vertices[k].Pos = grid.Vertices[i].Position;
 		vertices[k].Normal = grid.Vertices[i].Normal;
+		vertices[k].TexC = grid.Vertices[i].TexC;
 	}
 
 	for(size_t i = 0; i < sphere.Vertices.size(); ++i, ++k)
 	{
 		vertices[k].Pos = sphere.Vertices[i].Position;
 		vertices[k].Normal = sphere.Vertices[i].Normal;
+		vertices[k].TexC = sphere.Vertices[i].TexC;
 	}
 	
 	
@@ -799,6 +922,90 @@ void LitColumnsApp::BuildSkullGeometry()
 	mGeometries[geo->Name] = std::move(geo);
 }
 
+void LitColumnsApp::BuildTreeSpritesGeometry()
+{
+	struct TreeSpriteVertex
+	{
+		XMFLOAT3 Pos;
+		XMFLOAT2 Size;
+	};
+
+	static const int treeCount = 16;
+	std::array<TreeSpriteVertex, 16> vertices;
+	for (UINT i = 0; i < treeCount; ++i)
+	{
+		int left = MathHelper::Rand(0, 1);
+		int top = MathHelper::Rand(0, 1);
+		float x;
+		float z;
+
+		if (left == 0)
+		{
+			x = MathHelper::RandF(15.0f, 45.0f);
+			
+		}
+		else
+		{
+			x = MathHelper::RandF(-45.0f, -15.0f);
+		}
+		if (top == 0)
+		{
+			z = MathHelper::RandF(15.0f, 45.0f);
+		}
+		else
+		{
+			z = MathHelper::RandF(-45.0f, -15.0f);
+		}
+		
+		float y = -5.5f;
+			//GetHillsHeight(x, z);
+
+		// Move tree slightly above land height.
+		y += 8.0f;
+
+		vertices[i].Pos = XMFLOAT3(x, y, z);
+		vertices[i].Size = XMFLOAT2(5.0f, 5.0f);
+	}
+
+	std::array<std::uint16_t, 16> indices =
+	{
+		0, 1, 2, 3, 4, 5, 6, 7,
+		8, 9, 10, 11, 12, 13, 14, 15
+	};
+
+	const UINT vbByteSize = (UINT)vertices.size() * sizeof(TreeSpriteVertex);
+	const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint16_t);
+
+	auto geo = std::make_unique<MeshGeometry>();
+	geo->Name = "treeSpritesGeo";
+
+	ThrowIfFailed(D3DCreateBlob(vbByteSize, &geo->VertexBufferCPU));
+	CopyMemory(geo->VertexBufferCPU->GetBufferPointer(), vertices.data(), vbByteSize);
+
+	ThrowIfFailed(D3DCreateBlob(ibByteSize, &geo->IndexBufferCPU));
+	CopyMemory(geo->IndexBufferCPU->GetBufferPointer(), indices.data(), ibByteSize);
+
+	geo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+		mCommandList.Get(), vertices.data(), vbByteSize, geo->VertexBufferUploader);
+
+	geo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+		mCommandList.Get(), indices.data(), ibByteSize, geo->IndexBufferUploader);
+
+	geo->VertexByteStride = sizeof(TreeSpriteVertex);
+	geo->VertexBufferByteSize = vbByteSize;
+	geo->IndexFormat = DXGI_FORMAT_R16_UINT;
+	geo->IndexBufferByteSize = ibByteSize;
+
+	SubmeshGeometry submesh;
+	submesh.IndexCount = (UINT)indices.size();
+	submesh.StartIndexLocation = 0;
+	submesh.BaseVertexLocation = 0;
+
+	geo->DrawArgs["points"] = submesh;
+
+	mGeometries["treeSpritesGeo"] = std::move(geo);
+}
+
 void LitColumnsApp::BuildPSOs()
 {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC opaquePsoDesc;
@@ -829,8 +1036,12 @@ void LitColumnsApp::BuildPSOs()
 	opaquePsoDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
 	opaquePsoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
 	opaquePsoDesc.DSVFormat = mDepthStencilFormat;
-    ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaquePsoDesc, IID_PPV_ARGS(&mOpaquePSO)));
+	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaquePsoDesc, IID_PPV_ARGS(&mPSOs["opaque"])));
+    //ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&opaquePsoDesc, IID_PPV_ARGS(&mOpaquePSO)));
 
+	//
+	// PSO for transparent objects
+	//
 	
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC transparentPsoDesc = opaquePsoDesc;
 
@@ -847,8 +1058,45 @@ void LitColumnsApp::BuildPSOs()
 	transparencyBlendDesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 
 	transparentPsoDesc.BlendState.RenderTarget[0] = transparencyBlendDesc;
-	//ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&transparentPsoDesc, IID_PPV_ARGS(&mPSOs["transparent"])));
+	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&transparentPsoDesc, IID_PPV_ARGS(&mPSOs["transparent"])));
 	
+	//
+	// PSO for alpha tested objects
+	//
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC alphaTestedPsoDesc = opaquePsoDesc;
+	alphaTestedPsoDesc.PS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["alphaTestedPS"]->GetBufferPointer()),
+		mShaders["alphaTestedPS"]->GetBufferSize()
+	};
+	alphaTestedPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&alphaTestedPsoDesc, IID_PPV_ARGS(&mPSOs["alphaTested"])));
+
+	//
+	// PSO for tree sprites
+	//
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC treeSpritePsoDesc = opaquePsoDesc;
+	treeSpritePsoDesc.VS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["treeSpriteVS"]->GetBufferPointer()),
+		mShaders["treeSpriteVS"]->GetBufferSize()
+	};
+	treeSpritePsoDesc.GS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["treeSpriteGS"]->GetBufferPointer()),
+		mShaders["treeSpriteGS"]->GetBufferSize()
+	};
+	treeSpritePsoDesc.PS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["treeSpritePS"]->GetBufferPointer()),
+		mShaders["treeSpritePS"]->GetBufferSize()
+	};
+	treeSpritePsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+	treeSpritePsoDesc.InputLayout = { mTreeSpriteInputLayout.data(), (UINT)mTreeSpriteInputLayout.size() };
+	treeSpritePsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+
+	ThrowIfFailed(md3dDevice->CreateGraphicsPipelineState(&treeSpritePsoDesc, IID_PPV_ARGS(&mPSOs["treeSprites"])));
 }
 
 void LitColumnsApp::BuildFrameResources()
@@ -860,43 +1108,13 @@ void LitColumnsApp::BuildFrameResources()
     }
 }
 
-void LitColumnsApp::LoadTextures()
-{
-	auto woodCrateTex = std::make_unique<Texture>();
-	woodCrateTex->Name = "woodCrateTex";
-	woodCrateTex->Filename = L"Textures/WoodCrate01.dds";
-	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
-		mCommandList.Get(), woodCrateTex->Filename.c_str(),
-		woodCrateTex->Resource, woodCrateTex->UploadHeap));
-
-
-	auto stoneTex = std::make_unique<Texture>();
-	stoneTex->Name = "stoneTex";
-	stoneTex->Filename = L"Textures/stone.dds";
-	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
-		mCommandList.Get(), stoneTex->Filename.c_str(),
-		stoneTex->Resource, stoneTex->UploadHeap));
-
-	auto waterTex = std::make_unique<Texture>();
-	waterTex->Name = "waterTex";
-	waterTex->Filename = L"Textures/water1.dds";
-	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
-		mCommandList.Get(), waterTex->Filename.c_str(),
-		waterTex->Resource, waterTex->UploadHeap));
-
-	mTextures[woodCrateTex->Name] = std::move(woodCrateTex);
-	mTextures[stoneTex->Name] = std::move(stoneTex);
-	mTextures[waterTex->Name] = std::move(waterTex);
-
-}
-
 void LitColumnsApp::BuildDescriptorHeaps()
 {
 	//
 	// Create the SRV heap.
 	//
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 3;
+	srvHeapDesc.NumDescriptors = 5;
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvDescriptorHeap)));
@@ -909,6 +1127,8 @@ void LitColumnsApp::BuildDescriptorHeaps()
 	auto woodCrateTex = mTextures["woodCrateTex"]->Resource;
 	auto stoneTex = mTextures["stoneTex"]->Resource;
 	auto waterTex = mTextures["waterTex"]->Resource;
+	auto grassTex = mTextures["grassTex"]->Resource;
+	auto treeArrayTex = mTextures["treeArrayTex"]->Resource;
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -935,17 +1155,26 @@ void LitColumnsApp::BuildDescriptorHeaps()
 	//upload
 	md3dDevice->CreateShaderResourceView(waterTex.Get(), &srvDesc, hDescriptor);
 
+	// next descriptor
+	hDescriptor.Offset(1, mCbvSrvDescriptorSize);
+	//desc
+	srvDesc.Texture2D.MipLevels = grassTex->GetDesc().MipLevels;
+	srvDesc.Format = grassTex->GetDesc().Format;
+	//upload
+	md3dDevice->CreateShaderResourceView(grassTex.Get(), &srvDesc, hDescriptor);
 
-	/*D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc2 = {};
-	srvDesc2.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	srvDesc2.Format = stoneTex->GetDesc().Format;
-	srvDesc2.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-	srvDesc2.Texture2D.MostDetailedMip = 0;
-	srvDesc2.Texture2D.MipLevels = stoneTex->GetDesc().MipLevels;
-	srvDesc2.Texture2D.ResourceMinLODClamp = 0.0f;
-
-	md3dDevice->CreateShaderResourceView(stoneTex.Get(), &srvDesc2, hDescriptor2);*/
-
+	// next descriptor
+	hDescriptor.Offset(1, mCbvSrvDescriptorSize);
+	//desc
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+	srvDesc.Format = treeArrayTex->GetDesc().Format;
+	srvDesc.Texture2DArray.MostDetailedMip = 0;
+	srvDesc.Texture2DArray.MipLevels = -1;
+	srvDesc.Texture2DArray.FirstArraySlice = 0;
+	srvDesc.Texture2DArray.ArraySize = treeArrayTex->GetDesc().DepthOrArraySize;
+	//upload
+	md3dDevice->CreateShaderResourceView(treeArrayTex.Get(), &srvDesc, hDescriptor);
+	
 	
 }
 
@@ -976,7 +1205,7 @@ void LitColumnsApp::BuildMaterials()
 	tile0->FresnelR0 = XMFLOAT3(0.02f, 0.02f, 0.02f);
 	tile0->Roughness = 0.2f;
 
-	auto diamondMat = std::make_unique<Material>();
+	/*auto diamondMat = std::make_unique<Material>();
 	diamondMat->Name = "diamondMat";
 	diamondMat->MatCBIndex = 3;
 	diamondMat->DiffuseSrvHeapIndex = 3;
@@ -998,14 +1227,32 @@ void LitColumnsApp::BuildMaterials()
 	skullMat->DiffuseSrvHeapIndex = 5;
 	skullMat->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
 	skullMat->FresnelR0 = XMFLOAT3(0.05f, 0.05f, 0.05);
-	skullMat->Roughness = 0.3f;
+	skullMat->Roughness = 0.3f;*/
+
+	auto grassMat = std::make_unique<Material>();
+	grassMat->Name = "grassMat";
+	grassMat->MatCBIndex = 3;
+	grassMat->DiffuseSrvHeapIndex = 3;
+	grassMat->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+	grassMat->FresnelR0 = XMFLOAT3(0.05f, 0.05f, 0.05);
+	grassMat->Roughness = 0.3f;
+
+	auto treeSprites = std::make_unique<Material>();
+	treeSprites->Name = "treeSprites";
+	treeSprites->MatCBIndex = 4;
+	treeSprites->DiffuseSrvHeapIndex = 4;
+	treeSprites->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+	treeSprites->FresnelR0 = XMFLOAT3(0.01f, 0.01f, 0.01f);
+	treeSprites->Roughness = 0.125f;
 	
 	mMaterials["bricks0"] = std::move(bricks0);
 	mMaterials["stone0"] = std::move(stone0);
 	mMaterials["tile0"] = std::move(tile0);
-	mMaterials["diamondMat"] = std::move(diamondMat);
-	mMaterials["diamondMatRed"] = std::move(diamondMatRed);
-	mMaterials["skullMat"] = std::move(skullMat);
+	//mMaterials["diamondMat"] = std::move(diamondMat);
+	//mMaterials["diamondMatRed"] = std::move(diamondMatRed);
+	//mMaterials["skullMat"] = std::move(skullMat);
+	mMaterials["grassMat"] = std::move(grassMat);
+	mMaterials["treeSprites"] = std::move(treeSprites);
 }
 
 void LitColumnsApp::BuildRenderItems()
@@ -1020,6 +1267,7 @@ void LitColumnsApp::BuildRenderItems()
 	boxRitem->IndexCount = boxRitem->Geo->DrawArgs["box"].IndexCount;
 	boxRitem->StartIndexLocation = boxRitem->Geo->DrawArgs["box"].StartIndexLocation;
 	boxRitem->BaseVertexLocation = boxRitem->Geo->DrawArgs["box"].BaseVertexLocation;
+	mRitemLayer[(int)RenderLayer::Opaque].push_back(boxRitem.get());
 	mAllRitems.push_back(std::move(boxRitem));
 
 	auto moatRitem = std::make_unique<RenderItem>();
@@ -1032,115 +1280,126 @@ void LitColumnsApp::BuildRenderItems()
 	moatRitem->IndexCount = moatRitem->Geo->DrawArgs["torus"].IndexCount;
 	moatRitem->StartIndexLocation = moatRitem->Geo->DrawArgs["torus"].StartIndexLocation;
 	moatRitem->BaseVertexLocation = moatRitem->Geo->DrawArgs["torus"].BaseVertexLocation;
+	mRitemLayer[(int)RenderLayer::AlphaTested].push_back(moatRitem.get());
 	mAllRitems.push_back(std::move(moatRitem));
 
+	auto gridRitem = std::make_unique<RenderItem>();
+	//gridRitem->World = MathHelper::Identity4x4();
+	XMStoreFloat4x4(&gridRitem->World, XMMatrixScaling(4.0f, 1.0f, 4.0f)*XMMatrixRotationX(0.0f)*XMMatrixTranslation(0.0f, 0.0f, 0.0f));
+	XMStoreFloat4x4(&gridRitem->TexTransform, XMMatrixScaling(4.0f, 1.0f, 4.0f));
+	gridRitem->ObjCBIndex = 2;
+	gridRitem->Mat = mMaterials["grassMat"].get();
+	gridRitem->Geo = mGeometries["shapeGeo"].get();
+	gridRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	gridRitem->IndexCount = gridRitem->Geo->DrawArgs["grid"].IndexCount;
+	gridRitem->StartIndexLocation = gridRitem->Geo->DrawArgs["grid"].StartIndexLocation;
+	gridRitem->BaseVertexLocation = gridRitem->Geo->DrawArgs["grid"].BaseVertexLocation;
+	mRitemLayer[(int)RenderLayer::Opaque].push_back(gridRitem.get());
+	mAllRitems.push_back(std::move(gridRitem));
+
 	auto centerCylinderRitem = std::make_unique<RenderItem>();
-	XMStoreFloat4x4(&centerCylinderRitem->World, XMMatrixScaling(2.0f, 1.0f, 2.0f)*XMMatrixTranslation(0.0f, 3.0f, 0.0f));
+	XMStoreFloat4x4(&centerCylinderRitem->World, XMMatrixScaling(50.0f, 1.0f, 2.0f)*XMMatrixRotationX(0.0f)*XMMatrixTranslation(0.0f, 50.0f, 0.0f));
 	XMStoreFloat4x4(&centerCylinderRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	centerCylinderRitem->ObjCBIndex = 2;
+	centerCylinderRitem->ObjCBIndex = 3;
 	centerCylinderRitem->Mat = mMaterials["stone0"].get();
 	centerCylinderRitem->Geo = mGeometries["shapeGeo"].get();
 	centerCylinderRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	centerCylinderRitem->IndexCount = centerCylinderRitem->Geo->DrawArgs["cylinder"].IndexCount;
 	centerCylinderRitem->StartIndexLocation = centerCylinderRitem->Geo->DrawArgs["cylinder"].StartIndexLocation;
 	centerCylinderRitem->BaseVertexLocation = centerCylinderRitem->Geo->DrawArgs["cylinder"].BaseVertexLocation;
+	mRitemLayer[(int)RenderLayer::Opaque].push_back(centerCylinderRitem.get());
 	mAllRitems.push_back(std::move(centerCylinderRitem));
 
 	auto diamondRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&diamondRitem->World, XMMatrixScaling(0.2f, 0.2f, 0.2f)*XMMatrixRotationX(80.5)*XMMatrixTranslation(-0.7f, 2.5f, -0.7f));
 	XMStoreFloat4x4(&diamondRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	diamondRitem->ObjCBIndex = 3;
+	diamondRitem->ObjCBIndex = 4;
 	diamondRitem->Mat = mMaterials["stone0"].get();
 	diamondRitem->Geo = mGeometries["shapeGeo"].get();
 	diamondRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	diamondRitem->IndexCount = diamondRitem->Geo->DrawArgs["diamond"].IndexCount;
 	diamondRitem->StartIndexLocation = diamondRitem->Geo->DrawArgs["diamond"].StartIndexLocation;
 	diamondRitem->BaseVertexLocation = diamondRitem->Geo->DrawArgs["diamond"].BaseVertexLocation;
+	mRitemLayer[(int)RenderLayer::Opaque].push_back(diamondRitem.get());
 	mAllRitems.push_back(std::move(diamondRitem));
 
 	auto diamondLeftRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&diamondLeftRitem->World, XMMatrixScaling(0.2f, 0.2f, 0.2f)*XMMatrixRotationX(80.5)*XMMatrixTranslation(0.7f, 2.5f, -0.7f));
 	XMStoreFloat4x4(&diamondLeftRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	diamondLeftRitem->ObjCBIndex = 4;
+	diamondLeftRitem->ObjCBIndex = 5;
 	diamondLeftRitem->Mat = mMaterials["stone0"].get();
 	diamondLeftRitem->Geo = mGeometries["shapeGeo"].get();
 	diamondLeftRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	diamondLeftRitem->IndexCount = diamondLeftRitem->Geo->DrawArgs["diamond"].IndexCount;
 	diamondLeftRitem->StartIndexLocation = diamondLeftRitem->Geo->DrawArgs["diamond"].StartIndexLocation;
 	diamondLeftRitem->BaseVertexLocation = diamondLeftRitem->Geo->DrawArgs["diamond"].BaseVertexLocation;
+	mRitemLayer[(int)RenderLayer::Opaque].push_back(diamondLeftRitem.get());
 	mAllRitems.push_back(std::move(diamondLeftRitem));
 
 	auto coneRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&coneRitem->World, XMMatrixScaling(1.0f, 1.0f, 1.0f)*XMMatrixRotationX(0.0f)*XMMatrixTranslation(0.0f, 6.0f, 0.0f));
 	XMStoreFloat4x4(&coneRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	coneRitem->ObjCBIndex = 5;
+	coneRitem->ObjCBIndex = 6;
 	coneRitem->Mat = mMaterials["stone0"].get();
 	coneRitem->Geo = mGeometries["shapeGeo"].get();
 	coneRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	coneRitem->IndexCount = coneRitem->Geo->DrawArgs["cone"].IndexCount;
 	coneRitem->StartIndexLocation = coneRitem->Geo->DrawArgs["cone"].StartIndexLocation;
 	coneRitem->BaseVertexLocation = coneRitem->Geo->DrawArgs["cone"].BaseVertexLocation;
+	mRitemLayer[(int)RenderLayer::Opaque].push_back(coneRitem.get());
 	mAllRitems.push_back(std::move(coneRitem));
 
 	auto flagCylinderRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&flagCylinderRitem->World, XMMatrixScaling(.1f, 1.0f, .1f)*XMMatrixRotationX(0.0f)*XMMatrixTranslation(0.0f, 5.0f, 0.0f));
 	XMStoreFloat4x4(&flagCylinderRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	flagCylinderRitem->ObjCBIndex = 6;
+	flagCylinderRitem->ObjCBIndex = 7;
 	flagCylinderRitem->Mat = mMaterials["stone0"].get();
 	flagCylinderRitem->Geo = mGeometries["shapeGeo"].get();
 	flagCylinderRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	flagCylinderRitem->IndexCount = flagCylinderRitem->Geo->DrawArgs["cylinder"].IndexCount;
 	flagCylinderRitem->StartIndexLocation = flagCylinderRitem->Geo->DrawArgs["cylinder"].StartIndexLocation;
 	flagCylinderRitem->BaseVertexLocation = flagCylinderRitem->Geo->DrawArgs["cylinder"].BaseVertexLocation;
+	mRitemLayer[(int)RenderLayer::Opaque].push_back(flagCylinderRitem.get());
 	mAllRitems.push_back(std::move(flagCylinderRitem));
 
 	auto flagBoxRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&flagBoxRitem->World, XMMatrixScaling(1.0f, .4f, .1f)*XMMatrixRotationX(0.0f)*XMMatrixTranslation(-.5f, 7.25f, 0.0f));
 	XMStoreFloat4x4(&flagBoxRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	flagBoxRitem->ObjCBIndex = 7;
+	flagBoxRitem->ObjCBIndex = 8;
 	flagBoxRitem->Mat = mMaterials["stone0"].get();
 	flagBoxRitem->Geo = mGeometries["shapeGeo"].get();
 	flagBoxRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	flagBoxRitem->IndexCount = flagBoxRitem->Geo->DrawArgs["box"].IndexCount;
 	flagBoxRitem->StartIndexLocation = flagBoxRitem->Geo->DrawArgs["box"].StartIndexLocation;
 	flagBoxRitem->BaseVertexLocation = flagBoxRitem->Geo->DrawArgs["box"].BaseVertexLocation;
+	mRitemLayer[(int)RenderLayer::Opaque].push_back(flagBoxRitem.get());
 	mAllRitems.push_back(std::move(flagBoxRitem));
 
 	auto doorRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&doorRitem->World, XMMatrixScaling(1.f, .01, 4.f)*XMMatrixRotationX(XM_PI/2)*XMMatrixTranslation(0.0f, 0.0f, -5.0f));
 	XMStoreFloat4x4(&doorRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	doorRitem->ObjCBIndex = 8;
-	doorRitem->Mat = mMaterials["stone0"].get();
+	doorRitem->ObjCBIndex = 9;
+	doorRitem->Mat = mMaterials["tile0"].get();
 	doorRitem->Geo = mGeometries["shapeGeo"].get();
 	doorRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	doorRitem->IndexCount = doorRitem->Geo->DrawArgs["cylinder"].IndexCount;
 	doorRitem->StartIndexLocation = doorRitem->Geo->DrawArgs["cylinder"].StartIndexLocation;
 	doorRitem->BaseVertexLocation = doorRitem->Geo->DrawArgs["cylinder"].BaseVertexLocation;
+	mRitemLayer[(int)RenderLayer::Opaque].push_back(doorRitem.get());
 	mAllRitems.push_back(std::move(doorRitem));
 
 	auto bridgeRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&bridgeRitem->World, XMMatrixScaling(1.0f, 0.04f, 10.0f)*XMMatrixRotationX(0.0f)*XMMatrixTranslation(0.0f, 0.1f, -6.0f));
-	XMStoreFloat4x4(&bridgeRitem->TexTransform, XMMatrixScaling(1.0f, 1.0f, 1.0f));
-	bridgeRitem->ObjCBIndex = 9;
-	bridgeRitem->Mat = mMaterials["stone0"].get();
+	XMStoreFloat4x4(&bridgeRitem->TexTransform, XMMatrixScaling(1.0f, .04f, 10.0f));
+	bridgeRitem->ObjCBIndex = 10;
+	bridgeRitem->Mat = mMaterials["bricks0"].get();
 	bridgeRitem->Geo = mGeometries["shapeGeo"].get();
 	bridgeRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	bridgeRitem->IndexCount = bridgeRitem->Geo->DrawArgs["box"].IndexCount;
 	bridgeRitem->StartIndexLocation = bridgeRitem->Geo->DrawArgs["box"].StartIndexLocation;
 	bridgeRitem->BaseVertexLocation = bridgeRitem->Geo->DrawArgs["box"].BaseVertexLocation;
+	mRitemLayer[(int)RenderLayer::Opaque].push_back(bridgeRitem.get());
 	mAllRitems.push_back(std::move(bridgeRitem));
-
-    auto gridRitem = std::make_unique<RenderItem>();
-    gridRitem->World = MathHelper::Identity4x4();
-	XMStoreFloat4x4(&gridRitem->TexTransform, XMMatrixScaling(10.0f, 10.0f, 1.0f));
-	gridRitem->ObjCBIndex = 10;
-	gridRitem->Mat = mMaterials["bricks0"].get();
-	gridRitem->Geo = mGeometries["shapeGeo"].get();
-	gridRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-    gridRitem->IndexCount = gridRitem->Geo->DrawArgs["grid"].IndexCount;
-    gridRitem->StartIndexLocation = gridRitem->Geo->DrawArgs["grid"].StartIndexLocation;
-    gridRitem->BaseVertexLocation = gridRitem->Geo->DrawArgs["grid"].BaseVertexLocation;
-	mAllRitems.push_back(std::move(gridRitem));
 
 	auto skullRitem = std::make_unique<RenderItem>();
 	XMStoreFloat4x4(&skullRitem->World, XMMatrixScaling(0.5f, 0.5f, 0.5f)*XMMatrixTranslation(0.0f, .5f, 0.0f));
@@ -1152,6 +1411,7 @@ void LitColumnsApp::BuildRenderItems()
 	skullRitem->IndexCount = skullRitem->Geo->DrawArgs["skull"].IndexCount;
 	skullRitem->StartIndexLocation = skullRitem->Geo->DrawArgs["skull"].StartIndexLocation;
 	skullRitem->BaseVertexLocation = skullRitem->Geo->DrawArgs["skull"].BaseVertexLocation;
+	mRitemLayer[(int)RenderLayer::Opaque].push_back(skullRitem.get());
 	mAllRitems.push_back(std::move(skullRitem));
 
 	XMMATRIX brickTexTransform = XMMatrixScaling(1.0f, 1.0f, 1.0f);
@@ -1177,6 +1437,7 @@ void LitColumnsApp::BuildRenderItems()
 		leftPyramidRitem->IndexCount = leftPyramidRitem->Geo->DrawArgs["pyramid"].IndexCount;
 		leftPyramidRitem->StartIndexLocation = leftPyramidRitem->Geo->DrawArgs["pyramid"].StartIndexLocation;
 		leftPyramidRitem->BaseVertexLocation = leftPyramidRitem->Geo->DrawArgs["pyramid"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(leftPyramidRitem.get());
 
 		XMStoreFloat4x4(&rightPyramidRitem->World, rightPyramidWorld);
 		XMStoreFloat4x4(&rightPyramidRitem->TexTransform, brickTexTransform);
@@ -1187,6 +1448,7 @@ void LitColumnsApp::BuildRenderItems()
 		rightPyramidRitem->IndexCount = rightPyramidRitem->Geo->DrawArgs["pyramid"].IndexCount;
 		rightPyramidRitem->StartIndexLocation = rightPyramidRitem->Geo->DrawArgs["pyramid"].StartIndexLocation;
 		rightPyramidRitem->BaseVertexLocation = rightPyramidRitem->Geo->DrawArgs["pyramid"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(rightPyramidRitem.get());
 
 		XMStoreFloat4x4(&backPyramidRitem->World, backPyramidWorld);
 		XMStoreFloat4x4(&backPyramidRitem->TexTransform, brickTexTransform);
@@ -1197,6 +1459,7 @@ void LitColumnsApp::BuildRenderItems()
 		backPyramidRitem->IndexCount = backPyramidRitem->Geo->DrawArgs["pyramid"].IndexCount;
 		backPyramidRitem->StartIndexLocation = backPyramidRitem->Geo->DrawArgs["pyramid"].StartIndexLocation;
 		backPyramidRitem->BaseVertexLocation = backPyramidRitem->Geo->DrawArgs["pyramid"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(backPyramidRitem.get());
 
 		XMStoreFloat4x4(&frontPyramidRitem->World, frontPyramidWorld);
 		XMStoreFloat4x4(&frontPyramidRitem->TexTransform, brickTexTransform);
@@ -1207,7 +1470,8 @@ void LitColumnsApp::BuildRenderItems()
 		frontPyramidRitem->IndexCount = frontPyramidRitem->Geo->DrawArgs["pyramid"].IndexCount;
 		frontPyramidRitem->StartIndexLocation = frontPyramidRitem->Geo->DrawArgs["pyramid"].StartIndexLocation;
 		frontPyramidRitem->BaseVertexLocation = frontPyramidRitem->Geo->DrawArgs["pyramid"].BaseVertexLocation;
-		
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(frontPyramidRitem.get());
+
 		mAllRitems.push_back(std::move(leftPyramidRitem));
 		mAllRitems.push_back(std::move(rightPyramidRitem));
 		mAllRitems.push_back(std::move(backPyramidRitem));
@@ -1291,6 +1555,7 @@ void LitColumnsApp::BuildRenderItems()
 		rightWedge1Ritem->IndexCount = rightWedge1Ritem->Geo->DrawArgs["wedge"].IndexCount;
 		rightWedge1Ritem->StartIndexLocation = rightWedge1Ritem->Geo->DrawArgs["wedge"].StartIndexLocation;
 		rightWedge1Ritem->BaseVertexLocation = rightWedge1Ritem->Geo->DrawArgs["wedge"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(rightWedge1Ritem.get());
 
 		XMStoreFloat4x4(&rightWedge2Ritem->World, rightWedge2World);
 		XMStoreFloat4x4(&rightWedge2Ritem->TexTransform, brickTexTransform);
@@ -1301,6 +1566,7 @@ void LitColumnsApp::BuildRenderItems()
 		rightWedge2Ritem->IndexCount = rightWedge2Ritem->Geo->DrawArgs["wedge"].IndexCount;
 		rightWedge2Ritem->StartIndexLocation = rightWedge2Ritem->Geo->DrawArgs["wedge"].StartIndexLocation;
 		rightWedge2Ritem->BaseVertexLocation = rightWedge2Ritem->Geo->DrawArgs["wedge"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(rightWedge2Ritem.get());
 
 		XMStoreFloat4x4(&rightWedge3Ritem->World, rightWedge3World);
 		XMStoreFloat4x4(&rightWedge3Ritem->TexTransform, brickTexTransform);
@@ -1311,6 +1577,7 @@ void LitColumnsApp::BuildRenderItems()
 		rightWedge3Ritem->IndexCount = rightWedge3Ritem->Geo->DrawArgs["wedge"].IndexCount;
 		rightWedge3Ritem->StartIndexLocation = rightWedge3Ritem->Geo->DrawArgs["wedge"].StartIndexLocation;
 		rightWedge3Ritem->BaseVertexLocation = rightWedge3Ritem->Geo->DrawArgs["wedge"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(rightWedge3Ritem.get());
 
 		XMStoreFloat4x4(&rightWedge4Ritem->World, rightWedge4World);
 		XMStoreFloat4x4(&rightWedge4Ritem->TexTransform, brickTexTransform);
@@ -1321,6 +1588,7 @@ void LitColumnsApp::BuildRenderItems()
 		rightWedge4Ritem->IndexCount = rightWedge4Ritem->Geo->DrawArgs["wedge"].IndexCount;
 		rightWedge4Ritem->StartIndexLocation = rightWedge4Ritem->Geo->DrawArgs["wedge"].StartIndexLocation;
 		rightWedge4Ritem->BaseVertexLocation = rightWedge4Ritem->Geo->DrawArgs["wedge"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(rightWedge4Ritem.get());
 
 		XMStoreFloat4x4(&leftWedge1Ritem->World, leftWedge1World);
 		XMStoreFloat4x4(&leftWedge1Ritem->TexTransform, brickTexTransform);
@@ -1331,6 +1599,7 @@ void LitColumnsApp::BuildRenderItems()
 		leftWedge1Ritem->IndexCount = leftWedge1Ritem->Geo->DrawArgs["wedge"].IndexCount;
 		leftWedge1Ritem->StartIndexLocation = leftWedge1Ritem->Geo->DrawArgs["wedge"].StartIndexLocation;
 		leftWedge1Ritem->BaseVertexLocation = leftWedge1Ritem->Geo->DrawArgs["wedge"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(leftWedge1Ritem.get());
 
 		XMStoreFloat4x4(&leftWedge2Ritem->World, leftWedge2World);
 		XMStoreFloat4x4(&leftWedge2Ritem->TexTransform, brickTexTransform);
@@ -1341,6 +1610,7 @@ void LitColumnsApp::BuildRenderItems()
 		leftWedge2Ritem->IndexCount = leftWedge2Ritem->Geo->DrawArgs["wedge"].IndexCount;
 		leftWedge2Ritem->StartIndexLocation = leftWedge2Ritem->Geo->DrawArgs["wedge"].StartIndexLocation;
 		leftWedge2Ritem->BaseVertexLocation = leftWedge2Ritem->Geo->DrawArgs["wedge"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(leftWedge2Ritem.get());
 
 		XMStoreFloat4x4(&leftWedge3Ritem->World, leftWedge3World);
 		XMStoreFloat4x4(&leftWedge3Ritem->TexTransform, brickTexTransform);
@@ -1351,6 +1621,7 @@ void LitColumnsApp::BuildRenderItems()
 		leftWedge3Ritem->IndexCount = leftWedge3Ritem->Geo->DrawArgs["wedge"].IndexCount;
 		leftWedge3Ritem->StartIndexLocation = leftWedge3Ritem->Geo->DrawArgs["wedge"].StartIndexLocation;
 		leftWedge3Ritem->BaseVertexLocation = leftWedge3Ritem->Geo->DrawArgs["wedge"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(leftWedge3Ritem.get());
 
 		XMStoreFloat4x4(&leftWedge4Ritem->World, leftWedge4World);
 		XMStoreFloat4x4(&leftWedge4Ritem->TexTransform, brickTexTransform);
@@ -1361,6 +1632,7 @@ void LitColumnsApp::BuildRenderItems()
 		leftWedge4Ritem->IndexCount = leftWedge4Ritem->Geo->DrawArgs["wedge"].IndexCount;
 		leftWedge4Ritem->StartIndexLocation = leftWedge4Ritem->Geo->DrawArgs["wedge"].StartIndexLocation;
 		leftWedge4Ritem->BaseVertexLocation = leftWedge4Ritem->Geo->DrawArgs["wedge"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(leftWedge4Ritem.get());
 
 		XMStoreFloat4x4(&leftSpire1Ritem->World, leftSpire1World);
 		XMStoreFloat4x4(&leftSpire1Ritem->TexTransform, brickTexTransform);
@@ -1371,6 +1643,7 @@ void LitColumnsApp::BuildRenderItems()
 		leftSpire1Ritem->IndexCount = leftSpire1Ritem->Geo->DrawArgs["box"].IndexCount;
 		leftSpire1Ritem->StartIndexLocation = leftSpire1Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		leftSpire1Ritem->BaseVertexLocation = leftSpire1Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(leftSpire1Ritem.get());
 
 		XMStoreFloat4x4(&leftSpire2Ritem->World, leftSpire2World);
 		XMStoreFloat4x4(&leftSpire2Ritem->TexTransform, brickTexTransform);
@@ -1381,6 +1654,7 @@ void LitColumnsApp::BuildRenderItems()
 		leftSpire2Ritem->IndexCount = leftSpire2Ritem->Geo->DrawArgs["box"].IndexCount;
 		leftSpire2Ritem->StartIndexLocation = leftSpire2Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		leftSpire2Ritem->BaseVertexLocation = leftSpire2Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(leftSpire2Ritem.get());
 
 		XMStoreFloat4x4(&leftSpire3Ritem->World, leftSpire3World);
 		XMStoreFloat4x4(&leftSpire3Ritem->TexTransform, brickTexTransform);
@@ -1391,6 +1665,7 @@ void LitColumnsApp::BuildRenderItems()
 		leftSpire3Ritem->IndexCount = leftSpire3Ritem->Geo->DrawArgs["box"].IndexCount;
 		leftSpire3Ritem->StartIndexLocation = leftSpire3Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		leftSpire3Ritem->BaseVertexLocation = leftSpire3Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(leftSpire3Ritem.get());
 
 		XMStoreFloat4x4(&leftSpire4Ritem->World, leftSpire4World);
 		XMStoreFloat4x4(&leftSpire4Ritem->TexTransform, brickTexTransform);
@@ -1401,6 +1676,7 @@ void LitColumnsApp::BuildRenderItems()
 		leftSpire4Ritem->IndexCount = leftSpire4Ritem->Geo->DrawArgs["box"].IndexCount;
 		leftSpire4Ritem->StartIndexLocation = leftSpire4Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		leftSpire4Ritem->BaseVertexLocation = leftSpire4Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(leftSpire4Ritem.get());
 
 		XMStoreFloat4x4(&leftSpire5Ritem->World, leftSpire5World);
 		XMStoreFloat4x4(&leftSpire5Ritem->TexTransform, brickTexTransform);
@@ -1411,6 +1687,7 @@ void LitColumnsApp::BuildRenderItems()
 		leftSpire5Ritem->IndexCount = leftSpire5Ritem->Geo->DrawArgs["box"].IndexCount;
 		leftSpire5Ritem->StartIndexLocation = leftSpire5Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		leftSpire5Ritem->BaseVertexLocation = leftSpire5Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(leftSpire5Ritem.get());
 
 		XMStoreFloat4x4(&leftSpire6Ritem->World, leftSpire6World);
 		XMStoreFloat4x4(&leftSpire6Ritem->TexTransform, brickTexTransform);
@@ -1421,6 +1698,7 @@ void LitColumnsApp::BuildRenderItems()
 		leftSpire6Ritem->IndexCount = leftSpire6Ritem->Geo->DrawArgs["box"].IndexCount;
 		leftSpire6Ritem->StartIndexLocation = leftSpire6Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		leftSpire6Ritem->BaseVertexLocation = leftSpire6Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(leftSpire6Ritem.get());
 
 		XMStoreFloat4x4(&leftSpire7Ritem->World, leftSpire7World);
 		XMStoreFloat4x4(&leftSpire7Ritem->TexTransform, brickTexTransform);
@@ -1431,6 +1709,7 @@ void LitColumnsApp::BuildRenderItems()
 		leftSpire7Ritem->IndexCount = leftSpire7Ritem->Geo->DrawArgs["box"].IndexCount;
 		leftSpire7Ritem->StartIndexLocation = leftSpire7Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		leftSpire7Ritem->BaseVertexLocation = leftSpire7Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(leftSpire7Ritem.get());
 
 		XMStoreFloat4x4(&leftSpire8Ritem->World, leftSpire8World);
 		XMStoreFloat4x4(&leftSpire8Ritem->TexTransform, brickTexTransform);
@@ -1441,6 +1720,7 @@ void LitColumnsApp::BuildRenderItems()
 		leftSpire8Ritem->IndexCount = leftSpire8Ritem->Geo->DrawArgs["box"].IndexCount;
 		leftSpire8Ritem->StartIndexLocation = leftSpire8Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		leftSpire8Ritem->BaseVertexLocation = leftSpire8Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(leftSpire8Ritem.get());
 
 		XMStoreFloat4x4(&rightSpire1Ritem->World, rightSpire1World);
 		XMStoreFloat4x4(&rightSpire1Ritem->TexTransform, brickTexTransform);
@@ -1451,6 +1731,7 @@ void LitColumnsApp::BuildRenderItems()
 		rightSpire1Ritem->IndexCount = rightSpire1Ritem->Geo->DrawArgs["box"].IndexCount;
 		rightSpire1Ritem->StartIndexLocation = rightSpire1Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		rightSpire1Ritem->BaseVertexLocation = rightSpire1Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(rightSpire1Ritem.get());
 
 		XMStoreFloat4x4(&rightSpire2Ritem->World, rightSpire2World);
 		XMStoreFloat4x4(&rightSpire2Ritem->TexTransform, brickTexTransform);
@@ -1461,6 +1742,7 @@ void LitColumnsApp::BuildRenderItems()
 		rightSpire2Ritem->IndexCount = rightSpire2Ritem->Geo->DrawArgs["box"].IndexCount;
 		rightSpire2Ritem->StartIndexLocation = rightSpire2Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		rightSpire2Ritem->BaseVertexLocation = rightSpire2Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(rightSpire2Ritem.get());
 
 		XMStoreFloat4x4(&rightSpire3Ritem->World, rightSpire3World);
 		XMStoreFloat4x4(&rightSpire3Ritem->TexTransform, brickTexTransform);
@@ -1471,6 +1753,7 @@ void LitColumnsApp::BuildRenderItems()
 		rightSpire3Ritem->IndexCount = rightSpire3Ritem->Geo->DrawArgs["box"].IndexCount;
 		rightSpire3Ritem->StartIndexLocation = rightSpire3Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		rightSpire3Ritem->BaseVertexLocation = rightSpire3Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(rightSpire3Ritem.get());
 
 		XMStoreFloat4x4(&rightSpire4Ritem->World, rightSpire4World);
 		XMStoreFloat4x4(&rightSpire4Ritem->TexTransform, brickTexTransform);
@@ -1481,6 +1764,7 @@ void LitColumnsApp::BuildRenderItems()
 		rightSpire4Ritem->IndexCount = rightSpire4Ritem->Geo->DrawArgs["box"].IndexCount;
 		rightSpire4Ritem->StartIndexLocation = rightSpire4Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		rightSpire4Ritem->BaseVertexLocation = rightSpire4Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(rightSpire4Ritem.get());
 
 		XMStoreFloat4x4(&rightSpire5Ritem->World, rightSpire5World);
 		XMStoreFloat4x4(&rightSpire5Ritem->TexTransform, brickTexTransform);
@@ -1491,6 +1775,7 @@ void LitColumnsApp::BuildRenderItems()
 		rightSpire5Ritem->IndexCount = rightSpire5Ritem->Geo->DrawArgs["box"].IndexCount;
 		rightSpire5Ritem->StartIndexLocation = rightSpire5Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		rightSpire5Ritem->BaseVertexLocation = rightSpire5Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(rightSpire5Ritem.get());
 
 		XMStoreFloat4x4(&rightSpire6Ritem->World, rightSpire6World);
 		XMStoreFloat4x4(&rightSpire6Ritem->TexTransform, brickTexTransform);
@@ -1501,6 +1786,7 @@ void LitColumnsApp::BuildRenderItems()
 		rightSpire6Ritem->IndexCount = rightSpire6Ritem->Geo->DrawArgs["box"].IndexCount;
 		rightSpire6Ritem->StartIndexLocation = rightSpire6Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		rightSpire6Ritem->BaseVertexLocation = rightSpire6Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(rightSpire6Ritem.get());
 
 		XMStoreFloat4x4(&rightSpire7Ritem->World, rightSpire7World);
 		XMStoreFloat4x4(&rightSpire7Ritem->TexTransform, brickTexTransform);
@@ -1511,6 +1797,7 @@ void LitColumnsApp::BuildRenderItems()
 		rightSpire7Ritem->IndexCount = rightSpire7Ritem->Geo->DrawArgs["box"].IndexCount;
 		rightSpire7Ritem->StartIndexLocation = rightSpire7Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		rightSpire7Ritem->BaseVertexLocation = rightSpire7Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(rightSpire7Ritem.get());
 
 		XMStoreFloat4x4(&rightSpire8Ritem->World, rightSpire8World);
 		XMStoreFloat4x4(&rightSpire8Ritem->TexTransform, brickTexTransform);
@@ -1521,6 +1808,7 @@ void LitColumnsApp::BuildRenderItems()
 		rightSpire8Ritem->IndexCount = rightSpire8Ritem->Geo->DrawArgs["box"].IndexCount;
 		rightSpire8Ritem->StartIndexLocation = rightSpire8Ritem->Geo->DrawArgs["box"].StartIndexLocation;
 		rightSpire8Ritem->BaseVertexLocation = rightSpire8Ritem->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(rightSpire8Ritem.get());
 
 		XMStoreFloat4x4(&leftCylRitem->World, rightCylWorld);
 		XMStoreFloat4x4(&leftCylRitem->TexTransform, brickTexTransform);
@@ -1531,6 +1819,7 @@ void LitColumnsApp::BuildRenderItems()
 		leftCylRitem->IndexCount = leftCylRitem->Geo->DrawArgs["cylinder"].IndexCount;
 		leftCylRitem->StartIndexLocation = leftCylRitem->Geo->DrawArgs["cylinder"].StartIndexLocation;
 		leftCylRitem->BaseVertexLocation = leftCylRitem->Geo->DrawArgs["cylinder"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(leftCylRitem.get());
 
 		XMStoreFloat4x4(&rightCylRitem->World, leftCylWorld);
 		XMStoreFloat4x4(&rightCylRitem->TexTransform, brickTexTransform);
@@ -1541,6 +1830,7 @@ void LitColumnsApp::BuildRenderItems()
 		rightCylRitem->IndexCount = rightCylRitem->Geo->DrawArgs["cylinder"].IndexCount;
 		rightCylRitem->StartIndexLocation = rightCylRitem->Geo->DrawArgs["cylinder"].StartIndexLocation;
 		rightCylRitem->BaseVertexLocation = rightCylRitem->Geo->DrawArgs["cylinder"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(rightCylRitem.get());
 
 		mAllRitems.push_back(std::move(rightWedge1Ritem));
 		mAllRitems.push_back(std::move(rightWedge2Ritem));
@@ -1596,6 +1886,7 @@ void LitColumnsApp::BuildRenderItems()
 		MazeWallTop->IndexCount = MazeWallTop->Geo->DrawArgs["box"].IndexCount;
 		MazeWallTop->StartIndexLocation = MazeWallTop->Geo->DrawArgs["box"].StartIndexLocation;
 		MazeWallTop->BaseVertexLocation = MazeWallTop->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(MazeWallTop.get());
 		mAllRitems.push_back(std::move(MazeWallTop));
 
 		objCBIndex++;
@@ -1611,6 +1902,7 @@ void LitColumnsApp::BuildRenderItems()
 		MazeWallBot->IndexCount = MazeWallBot->Geo->DrawArgs["box"].IndexCount;
 		MazeWallBot->StartIndexLocation = MazeWallBot->Geo->DrawArgs["box"].StartIndexLocation;
 		MazeWallBot->BaseVertexLocation = MazeWallBot->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(MazeWallBot.get());
 		mAllRitems.push_back(std::move(MazeWallBot));
 
 		offset += scale;
@@ -1632,6 +1924,7 @@ void LitColumnsApp::BuildRenderItems()
 		MazeWallRight->IndexCount = MazeWallRight->Geo->DrawArgs["box"].IndexCount;
 		MazeWallRight->StartIndexLocation = MazeWallRight->Geo->DrawArgs["box"].StartIndexLocation;
 		MazeWallRight->BaseVertexLocation = MazeWallRight->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(MazeWallRight.get());
 		mAllRitems.push_back(std::move(MazeWallRight));
 
 		objCBIndex++;
@@ -1647,6 +1940,7 @@ void LitColumnsApp::BuildRenderItems()
 		MazeWallLeft->IndexCount = MazeWallLeft->Geo->DrawArgs["box"].IndexCount;
 		MazeWallLeft->StartIndexLocation = MazeWallLeft->Geo->DrawArgs["box"].StartIndexLocation;
 		MazeWallLeft->BaseVertexLocation = MazeWallLeft->Geo->DrawArgs["box"].BaseVertexLocation;
+		mRitemLayer[(int)RenderLayer::Opaque].push_back(MazeWallLeft.get());
 		mAllRitems.push_back(std::move(MazeWallLeft));
 
 		offset += scale;
@@ -1677,6 +1971,7 @@ void LitColumnsApp::BuildRenderItems()
 				MazeWallVert->IndexCount = MazeWallVert->Geo->DrawArgs["box"].IndexCount;
 				MazeWallVert->StartIndexLocation = MazeWallVert->Geo->DrawArgs["box"].StartIndexLocation;
 				MazeWallVert->BaseVertexLocation = MazeWallVert->Geo->DrawArgs["box"].BaseVertexLocation;
+				mRitemLayer[(int)RenderLayer::Opaque].push_back(MazeWallVert.get());
 				mAllRitems.push_back(std::move(MazeWallVert));
 
 				objCBIndex++;
@@ -1696,6 +1991,7 @@ void LitColumnsApp::BuildRenderItems()
 				MazeWallHor->IndexCount = MazeWallHor->Geo->DrawArgs["box"].IndexCount;
 				MazeWallHor->StartIndexLocation = MazeWallHor->Geo->DrawArgs["box"].StartIndexLocation;
 				MazeWallHor->BaseVertexLocation = MazeWallHor->Geo->DrawArgs["box"].BaseVertexLocation;
+				mRitemLayer[(int)RenderLayer::Opaque].push_back(MazeWallHor.get());
 				mAllRitems.push_back(std::move(MazeWallHor));
 
 				objCBIndex++;
@@ -1704,7 +2000,20 @@ void LitColumnsApp::BuildRenderItems()
 		}
 
 	}
-	
+
+	objCBIndex++;
+
+	auto treeSpritesRitem = std::make_unique<RenderItem>();
+	treeSpritesRitem->World = MathHelper::Identity4x4();
+	treeSpritesRitem->ObjCBIndex = 3;
+	treeSpritesRitem->Mat = mMaterials["treeSprites"].get();
+	treeSpritesRitem->Geo = mGeometries["treeSpritesGeo"].get();
+	treeSpritesRitem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_POINTLIST;
+	treeSpritesRitem->IndexCount = treeSpritesRitem->Geo->DrawArgs["points"].IndexCount;
+	treeSpritesRitem->StartIndexLocation = treeSpritesRitem->Geo->DrawArgs["points"].StartIndexLocation;
+	treeSpritesRitem->BaseVertexLocation = treeSpritesRitem->Geo->DrawArgs["points"].BaseVertexLocation;
+	mRitemLayer[(int)RenderLayer::AlphaTestedTreeSprites].push_back(treeSpritesRitem.get());
+	mAllRitems.push_back(std::move(treeSpritesRitem));
 
 	// All the render items are opaque.
 	for(auto& e : mAllRitems)
@@ -1799,4 +2108,23 @@ std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> LitColumnsApp::GetStaticSampler
 		pointWrap, pointClamp,
 		linearWrap, linearClamp,
 		anisotropicWrap, anisotropicClamp };
+}
+
+float LitColumnsApp::GetHillsHeight(float x, float z)const
+{
+	return 0.3f*(z*sinf(0.1f*x) + x*cosf(0.1f*z));
+}
+
+XMFLOAT3 LitColumnsApp::GetHillsNormal(float x, float z)const
+{
+	// n = (-df/dx, 1, -df/dz)
+	XMFLOAT3 n(
+		-0.03f*z*cosf(0.1f*x) - 0.3f*cosf(0.1f*z),
+		1.0f,
+		-0.3f*sinf(0.1f*x) + 0.03f*x*sinf(0.1f*z));
+
+	XMVECTOR unitNormal = XMVector3Normalize(XMLoadFloat3(&n));
+	XMStoreFloat3(&n, unitNormal);
+
+	return n;
 }
